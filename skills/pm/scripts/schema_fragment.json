@@ -1,0 +1,29 @@
+{
+  "Task": {
+    "links": {
+      "parentTask":  {"kind": "single", "target_types": ["Task"]},
+      "spawnedAt":   {"kind": "single", "target_types": ["TaskStatus"]},
+      "dependsOn":   {"kind": "many",   "target_types": ["Task"]}
+    }
+  },
+  "TaskStatus": {
+    "links": {
+      "task":        {"kind": "single", "target_types": ["Task"]},
+      "prevStatus":  {"kind": "single", "target_types": ["TaskStatus"]},
+      "proof":       {"kind": "single", "target_types": ["TaskReport"]}
+    }
+  },
+  "TaskReport": {
+    "links": {
+      "task":        {"kind": "single", "target_types": ["Task"]},
+      "prevReport":  {"kind": "single", "target_types": ["TaskReport"]}
+    }
+  },
+  "TaskHeartbeat": {
+    "links": {
+      "task":          {"kind": "single", "target_types": ["Task"]},
+      "claimStatus":   {"kind": "single", "target_types": ["TaskStatus"]},
+      "prevHeartbeat": {"kind": "single", "target_types": ["TaskHeartbeat"]}
+    }
+  }
+}

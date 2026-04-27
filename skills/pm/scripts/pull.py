@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Pull and claim the next runnable task in one shot.
+
+Usage:
+  pull.py [--queue Q] [--max-retries N] [--regex P]
+
+Behavior:
+  1. Call next() to get a runnable task.
+  2. Try to claim it via append_status('working'); on race-loss (the latest
+     status is no longer 'new'), pull the next one. Retry up to --max-retries
+     races (default 5).
+  3. On success print three shell-eval-able lines to stdout:
+        TASK=<text_sha256>
+        IDEA_PATH=<extracted from task.text via regex; empty if no match>
+        SLUG=<task.attributes.slug>
+     Caller in bash: ``eval "$(pm pull)"`` and then check ``[ -n "$TASK" ]``.
+  4. On queue-empty: exit 0 with NO output (TASK ends up empty).
+  5. On all races lost: exit 0 with NO output and a stderr note.
+
+The default --regex extracts the path that follows
+``Run /qualify-idea-toulmin `` on line 1 of task.text. Override with
+``--regex`` (Python regex; first capture group is used) for other workflows.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+
+import store
+from now_iso import now_iso
+
+
+def shell_quote(v: str) -> str:
+    return "'" + v.replace("'", "'\\''") + "'"
+
+
+def main() -> int:
+    p = argparse.ArgumentParser()
+    p.add_argument("--queue", default="default")
+    p.add_argument("--max-retries", type=int, default=5)
+    p.add_argument(
+        "--regex",
+        default=r"Run /qualify-idea-toulmin (\S+)",
+        help="Python regex to extract a path-or-arg from task.text; group 1.",
+    )
+    args = p.parse_args()
+
+    pat = re.compile(args.regex)
+
+    for attempt in range(args.max_retries + 1):
+        # Re-implement next.py logic inline to avoid double round-trip.
+        tasks = sorted(store.list_tasks(args.queue), key=lambda t: t.get("created_at", ""))
+        candidate = None
+        for t in tasks:
+            sha = t["text_sha256"]
+            if store.status_value(store.latest_status(sha)) != "new":
+                continue
+            deps = (t.get("links") or {}).get("dependsOn") or []
+            if any(store.status_value(store.latest_status(d)) != "done" for d in deps):
+                continue
+            candidate = t
+            break
+
+        if candidate is None:
+            return 0  # queue empty
+
+        sha = candidate["text_sha256"]
+        # Race-safe claim: append working status, then re-read tip; if it
+        # is not ours, treat as lost and try again.
+        prev_text_sha = store.latest_status(sha)["text_sha256"]
+        new_status = store.append_status(sha, "working", note=f"claimed for execution")
+        tip = store.latest_status(sha)
+        if not tip or tip["text_sha256"] != new_status["text_sha256"]:
+            # someone else's status overtook ours
+            sys.stderr.write(f"pull: race lost on {sha[:16]} (attempt {attempt+1}/{args.max_retries+1})\n")
+            continue
+        # Also defend against the prev-not-being-new case (shouldn't happen
+        # because next.py filtered, but be safe):
+        if prev_text_sha != tip["links"].get("prevStatus", ""):
+            sys.stderr.write(f"pull: prevStatus mismatch on {sha[:16]}\n")
+            continue
+
+        slug = (candidate.get("attributes") or {}).get("slug") or ""
+        text = candidate.get("text") or ""
+        m = pat.search(text)
+        idea_path = m.group(1) if m else ""
+
+        print(f"TASK={shell_quote(sha)}")
+        print(f"IDEA_PATH={shell_quote(idea_path)}")
+        print(f"SLUG={shell_quote(slug)}")
+        return 0
+
+    sys.stderr.write(f"pull: all {args.max_retries+1} attempts lost races\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

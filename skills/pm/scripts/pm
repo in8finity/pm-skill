@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# pm — planning-board CLI dispatcher.
+#
+# Usage:
+#   pm next            [-- args for next.py]
+#   pm pull            [-- args for pull.py — atomic next+claim, emits TASK/IDEA_PATH/SLUG]
+#   pm executing       [-- args for executing.py]
+#   pm plan            [-- args for plan.py]
+#   pm bulk-plan       [-- args for bulk_plan.py]
+#   pm report          [-- args for report.py]
+#   pm finished        [-- args for finished.py]
+#   pm heal            [-- args for heal_orphans.py]
+#   pm status          [-- args for queue_status.py]
+#   pm setup           [-- args for setup_schema.py]
+#   pm heartbeat       [-- args for heartbeat.py — tick a working task's lease]
+#   pm sweep           [-- args for sweep.py — reclaim stale (zombie) tasks]
+#   pm reclaim         [-- args for reclaim.py — force-reclaim a single task]
+#   pm cancel          [-- args for cancel.py — supervisor cancel + cascade]
+#   pm replan          [-- args for replan.py — restart task + upstream chain]
+#   pm context-id      [-- args for context_id.py — generate sticky-context UUID]
+#
+# Any further args are forwarded verbatim to the underlying script. The
+# scripts themselves use stable Python imports relative to this dir, so
+# this wrapper just ensures the right script is invoked.
+
+set -euo pipefail
+
+# Resolve symlinks so this works when invoked via `scripts/pm` (a symlink).
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+
+case "${1:-}" in
+  next)       shift; exec "$DIR/next.py" "$@" ;;
+  pull)       shift; exec "$DIR/pull.py" "$@" ;;
+  executing)  shift; exec "$DIR/executing.py" "$@" ;;
+  plan)       shift; exec "$DIR/plan.py" "$@" ;;
+  bulk-plan)  shift; exec "$DIR/bulk_plan.py" "$@" ;;
+  report)     shift; exec "$DIR/report.py" "$@" ;;
+  finished)   shift; exec "$DIR/finished.py" "$@" ;;
+  heal)       shift; exec "$DIR/heal_orphans.py" "$@" ;;
+  status)     shift; exec "$DIR/queue_status.py" "$@" ;;
+  setup)      shift; exec "$DIR/setup_schema.py" "$@" ;;
+  heartbeat)  shift; exec "$DIR/heartbeat.py" "$@" ;;
+  sweep)      shift; exec "$DIR/sweep.py" "$@" ;;
+  reclaim)    shift; exec "$DIR/reclaim.py" "$@" ;;
+  cancel)     shift; exec "$DIR/cancel.py" "$@" ;;
+  replan)     shift; exec "$DIR/replan.py" "$@" ;;
+  context-id) shift; exec "$DIR/context_id.py" "$@" ;;
+  ""|-h|--help)
+    sed -n '2,19p' "$0"
+    exit 0
+    ;;
+  *)
+    echo "pm: unknown subcommand '$1'" >&2
+    sed -n '2,19p' "$0" >&2
+    exit 64
+    ;;
+esac
