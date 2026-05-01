@@ -13,9 +13,10 @@ module planning
       race, not on the full chain history. The chain itself is audit-only.
     - Claim is modeled in two phases (start + commit | abort) so the
       read-status / append-status race window in executing.py is explicit.
-        startClaim(a, t)   ~ executing.py reads "new" and appends working
-        commitClaim(x)     ~ x's append wins the latest-tip race
-        abortClaim(x)      ~ x's append loses; recheck protocol catches it
+        startClaim(a, t)   ~ executing.py reads "new" and prepares the append
+        commitClaim(x)     ~ x's append wins the chain-head compare-and-swap
+        abortClaim(x)      ~ x's append loses; hashharness's chain_predecessor
+                             check on `prevStatus` rejects it with 'head moved'
     - Single-step "atomic" transitions assume serialized linearization of
       append events (one append per step). Concurrent appends are modeled
       as overlapping startClaim attempts that resolve via commit/abort.
@@ -210,8 +211,9 @@ pred commitClaim[x: Attempt] {
   frameOtherTasks[x.task]
 }
 
-// Phase 2b: x's append did NOT become the latest tip. Recheck protocol
-// detects this and the agent backs off without proceeding.
+// Phase 2b: x's append did NOT become the latest tip. Hashharness's
+// `chain_predecessor` check on `prevStatus` rejects the append at write
+// time ('head moved'); the agent backs off without proceeding.
 pred abortClaim[x: Attempt] {
   x in OpenAttempts
   not isNew[x.task]                          // someone else already committed

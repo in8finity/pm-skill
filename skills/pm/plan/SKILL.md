@@ -1,5 +1,5 @@
 ---
-name: planning-plan
+name: pm-plan
 description: >
   Enqueue a new task on the planning board backed by hashharness. Creates an
   immutable Task record plus an initial TaskStatus(new). Supports subtasks
@@ -8,7 +8,7 @@ description: >
   task", or "create subtask".
 ---
 
-# planning:plan — enqueue a task
+# pm:plan — enqueue a task
 
 ## Inputs
 
@@ -97,4 +97,4 @@ This is the structural gate that `system-models/planning_plan_race.als`'s
 - Task records use `work_package_id = planning:<queue>`.
 - TaskStatus and TaskReport records use `work_package_id = planning:task:<task-sha>`
   so `find_tip` returns the latest status / report per task in O(1).
-- The genesis status is `new`. To begin work, use `planning:executing`.
+- The genesis status is `new`. To begin work, use `pm:executing`.

@@ -1,5 +1,5 @@
 ---
-name: planning-replan
+name: pm-replan
 description: >
   Replan a task — restart it (and by default all its dependency-chain
   ancestors) so a fresh worker can pick the chain up from the start.
@@ -9,7 +9,7 @@ description: >
   body/verifier adjustments to the target via --text / --verifier.
 ---
 
-# planning:replan — restart a task and its upstream chain
+# pm:replan — restart a task and its upstream chain
 
 ## Procedure
 

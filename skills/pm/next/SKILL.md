@@ -1,5 +1,5 @@
 ---
-name: next
+name: pm-next
 description: >
   Return the next runnable planning task as JSON, or "null" if the queue is
   empty / blocked. A task is runnable when its current TaskStatus is "new"
@@ -7,7 +7,7 @@ description: >
   says "next task", "what's next", "pull next", or before spawning a worker.
 ---
 
-# planning:next — pull the next runnable task
+# pm:next — pull the next runnable task
 
 ## Procedure
 
@@ -15,7 +15,7 @@ description: >
 
 - Prints the full Task JSON of the oldest runnable task, or the literal
   string `null` if none.
-- Does **not** mutate state — call `planning:executing` to claim the task.
+- Does **not** mutate state — call `pm:executing` to claim the task.
 
 ## Selection rules
 

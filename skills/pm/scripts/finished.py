@@ -456,7 +456,7 @@ def main() -> int:
         args.task,
         final_status,
         note=args.note or f"finished as {final_status}",
-        proof_report_sha=report["text_sha256"],
+        proof_report_sha=report["record_sha256"],
         extra_attrs=extra_attrs or None,
     )
     print(json.dumps(out, indent=2))

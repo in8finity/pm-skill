@@ -1,5 +1,5 @@
 ---
-name: planning-finished
+name: pm-finished
 description: >
   Mark a task as done (or rejected) on the planning board. Appends a
   terminal TaskStatus that links proof -> latest TaskReport on the task.
@@ -10,7 +10,7 @@ description: >
   --rejected to close as failed instead.
 ---
 
-# planning:finished — close a task with proof
+# pm:finished — close a task with proof
 
 ## Procedure
 

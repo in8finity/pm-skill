@@ -9,21 +9,21 @@
   "TaskStatus": {
     "links": {
       "task":        {"kind": "single", "target_types": ["Task"]},
-      "prevStatus":  {"kind": "single", "target_types": ["TaskStatus"]},
+      "prevStatus":  {"kind": "single", "target_types": ["TaskStatus"], "chain_predecessor": true},
       "proof":       {"kind": "single", "target_types": ["TaskReport"]}
     }
   },
   "TaskReport": {
     "links": {
       "task":        {"kind": "single", "target_types": ["Task"]},
-      "prevReport":  {"kind": "single", "target_types": ["TaskReport"]}
+      "prevReport":  {"kind": "single", "target_types": ["TaskReport"], "chain_predecessor": true}
     }
   },
   "TaskHeartbeat": {
     "links": {
       "task":          {"kind": "single", "target_types": ["Task"]},
       "claimStatus":   {"kind": "single", "target_types": ["TaskStatus"]},
-      "prevHeartbeat": {"kind": "single", "target_types": ["TaskHeartbeat"]}
+      "prevHeartbeat": {"kind": "single", "target_types": ["TaskHeartbeat"], "chain_predecessor": true}
     }
   }
 }

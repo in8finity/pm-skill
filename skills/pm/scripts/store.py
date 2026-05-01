@@ -7,9 +7,26 @@ import secrets
 from typing import Any, Iterable
 
 import mcp_client
-from now_iso import now_iso
 
 VALID_STATUSES = ("new", "working", "done", "rejected", "superseded")
+
+
+def _link_record_sha_for(text_sha: str) -> str:
+    """Resolve a Task's content-addressed identity (text_sha256) to the stored
+    record's ``record_sha256`` for use as a link value.
+
+    Inter-item links now reference ``record_sha256`` (hashharness 3a6cd18) so
+    a target's full record (text + meta + links) is pinned, not just its text.
+    Callers still hold text_sha256 as the canonical Task identity (it's the
+    work-package namespace key and the slug-uniqueness gate); this helper
+    bridges the two at link-write time.
+    """
+    item = mcp_client.tool("get_item_by_hash", {"text_sha256": text_sha})
+    if not isinstance(item, dict) or "record_sha256" not in item:
+        raise RuntimeError(
+            f"cannot resolve record_sha256 for text_sha256={text_sha[:12]}"
+        )
+    return item["record_sha256"]
 
 
 class SlugTaken(Exception):
@@ -21,12 +38,30 @@ class SlugTaken(Exception):
         super().__init__(f"slug '{slug}' already exists in queue '{queue}'")
 
 
-class ClaimLost(Exception):
-    """Raised when append_claim fails because another agent claimed off the same prev-tip.
+class HeadMoved(Exception):
+    """Raised when an append targeting a stale chain-head is rejected.
 
-    The deterministic claim text (``claim:<task>:<prev>``) makes two parallel
-    claimants targeting the same prev-tip collide on text_sha256; hashharness
-    rejects the second.
+    Hashharness enforces ``chain_predecessor`` natively (schema 2026-05+):
+    ``prevStatus`` / ``prevReport`` / ``prevHeartbeat`` must equal the
+    current head record_sha256 for (work_package_id, type), else
+    ``create_item`` rejects with 'head moved'. This exception surfaces
+    that condition to callers that want to retry against the new tip.
+    """
+    def __init__(self, work_package_id: str, type_name: str,
+                 mcp_error: dict[str, Any] | None = None) -> None:
+        self.work_package_id = work_package_id
+        self.type_name = type_name
+        self.mcp_error = mcp_error
+        super().__init__(
+            f"head moved on ({work_package_id}, {type_name})"
+        )
+
+
+class ClaimLost(Exception):
+    """Raised when append_claim fails because another agent claimed off the
+    same prev-tip first. Now a thin re-classification of HeadMoved on the
+    TaskStatus chain — the storage layer's compare-and-swap on the head
+    pointer is the actual race-resolution primitive.
     """
     def __init__(self, task_sha: str, prev_status_sha: str, mcp_error: dict[str, Any] | None = None) -> None:
         self.task_sha = task_sha
@@ -35,6 +70,13 @@ class ClaimLost(Exception):
         super().__init__(
             f"claim race lost on task {task_sha[:12]} (prev={prev_status_sha[:12]})"
         )
+
+
+def _is_head_moved(err: dict[str, Any] | None) -> bool:
+    if not err:
+        return False
+    msg = str(err.get("message", err)).lower()
+    return "head moved" in msg or "head has moved" in msg
 
 
 def queue_wp(queue: str) -> str:
@@ -293,12 +335,12 @@ def create_task(
 ) -> dict[str, Any]:
     links: dict[str, Any] = {}
     if parent_task_sha:
-        links["parentTask"] = parent_task_sha
+        links["parentTask"] = _link_record_sha_for(parent_task_sha)
     if spawned_at_status_sha:
-        links["spawnedAt"] = spawned_at_status_sha
+        links["spawnedAt"] = _link_record_sha_for(spawned_at_status_sha)
     deps = list(depends_on or [])
     if deps:
-        links["dependsOn"] = deps
+        links["dependsOn"] = [_link_record_sha_for(d) for d in deps]
     # `text` (the caller's free-form body) moves to attributes.body so the
     # record's `text_sha256` is determined solely by (queue, slug). Two parallel
     # plan() calls with the same slug now produce the same text_sha256 and
@@ -315,7 +357,6 @@ def create_task(
         {
             "type": "Task",
             "work_package_id": queue_wp(queue),
-            "created_at": now_iso(),
             "title": title,
             "text": task_identity_text(queue, slug),
             "attributes": attributes,
@@ -340,29 +381,35 @@ def append_status(
     proof_report_sha: str | None = None,
     extra_attrs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Append a TaskStatus chained off the current tip.
+
+    ``task_sha`` is the Task's text_sha256 (canonical content-addressed
+    identity). ``proof_report_sha`` is the proof-target's record_sha256
+    (already-resolved link value — see hashharness 3a6cd18).
+    """
     if status not in VALID_STATUSES:
         raise ValueError(f"invalid status: {status}; expected one of {VALID_STATUSES}")
     prev = latest_status(task_sha)
-    links: dict[str, Any] = {"task": task_sha}
+    links: dict[str, Any] = {"task": _link_record_sha_for(task_sha)}
     if prev:
-        links["prevStatus"] = prev["text_sha256"]
+        links["prevStatus"] = prev["record_sha256"]
     if proof_report_sha:
         links["proof"] = proof_report_sha
     body = note or status
-    # `#nonce:` is purely a hash-uniqueness footer (sha256(text) is the
-    # record id, so two appends with identical bodies would otherwise
-    # collide). Auditable facts live elsewhere: timestamp in `created_at`,
-    # prev-edge in `links.prevStatus`, status in `attributes.status`.
+    # `#nonce:` is a hash-uniqueness footer; concurrent appends are gated
+    # by hashharness's native `chain_predecessor` check on ``prevStatus``,
+    # not by text-collision. Auditable facts live in `created_at`,
+    # `links.prevStatus`, and `attributes.status`.
     text = f"{body}\n#nonce:{secrets.token_hex(8)}"
     attributes: dict[str, Any] = {"status": status}
     if extra_attrs:
         attributes.update(extra_attrs)
-    return mcp_client.tool(
+    wp = task_wp(task_sha)
+    result, err = mcp_client.tool_safe(
         "create_item",
         {
             "type": "TaskStatus",
-            "work_package_id": task_wp(task_sha),
-            "created_at": now_iso(),
+            "work_package_id": wp,
             "title": f"{status}: {task_sha[:8]}",
             "text": text,
             "attributes": attributes,
@@ -370,6 +417,11 @@ def append_status(
             "return": "full",
         },
     )
+    if err is not None:
+        if _is_head_moved(err):
+            raise HeadMoved(wp, "TaskStatus", mcp_error=err)
+        raise RuntimeError(f"create_item failed: {err}")
+    return result
 
 
 def get_task(task_sha: str) -> dict[str, Any] | None:
@@ -382,42 +434,30 @@ def get_task(task_sha: str) -> dict[str, Any] | None:
 
 def append_claim(task_sha: str, agent: str, prev_status_sha: str,
                  *, context_id: str | None = None) -> dict[str, Any]:
-    """Atomically claim a task — deterministic-text TaskStatus(working).
+    """Atomically claim a task by appending TaskStatus(working).
 
-    The text is fully determined by (task_sha, prev_status_sha) and carries
-    no nonce, so two concurrent agents observing the same prev-tip produce
-    identical ``text_sha256``. With hashharness's atomic check-then-insert
-    in ``create_item`` (cache_lock held continuously), only one such
-    create succeeds; the second raises ``ClaimLost``. Agent identity is
-    in ``attributes.agent`` (not in text), so it doesn't break the
-    collision.
+    Race-safety is provided by hashharness's native ``chain_predecessor``
+    check on ``prevStatus``: two concurrent claimants observing the same
+    tip both submit ``prevStatus = prev_status_sha``; the storage layer
+    compare-and-swaps the head, one append succeeds, the other is
+    rejected with 'head moved' which we surface as ``ClaimLost``.
 
-    Caller is responsible for the pre-claim check that ``prev_status_sha``
-    is the current latest tip with ``status == "new"``.
+    ``prev_status_sha`` must be the current tip's ``record_sha256``.
+    Caller is responsible for the pre-claim check that the tip's
+    ``status == "new"``.
     """
-    text = f"claim:{task_sha[:16]}/{prev_status_sha[:16]}"
-    attributes: dict[str, Any] = {"status": "working", "agent": agent}
+    extra: dict[str, Any] = {"agent": agent}
     if context_id:
-        attributes["context_id"] = context_id
-    result, err = mcp_client.tool_safe(
-        "create_item",
-        {
-            "type": "TaskStatus",
-            "work_package_id": task_wp(task_sha),
-            "created_at": now_iso(),
-            "title": f"working: {task_sha[:8]}",
-            "text": text,
-            "attributes": attributes,
-            "links": {"task": task_sha, "prevStatus": prev_status_sha},
-            "return": "full",
-        },
-    )
-    if err is not None:
-        msg = str(err.get("message", err)).lower()
-        if "already exists" in msg or "cannot be updated" in msg:
-            raise ClaimLost(task_sha, prev_status_sha, mcp_error=err)
-        raise RuntimeError(f"create_item failed: {err}")
-    return result
+        extra["context_id"] = context_id
+    try:
+        return append_status(
+            task_sha,
+            "working",
+            note=f"claimed by {agent}",
+            extra_attrs=extra,
+        )
+    except HeadMoved as e:
+        raise ClaimLost(task_sha, prev_status_sha, mcp_error=e.mcp_error) from e
 
 
 def latest_heartbeat(task_sha: str) -> dict[str, Any] | None:
@@ -432,19 +472,23 @@ def append_heartbeat(task_sha: str, agent: str, claim_status_sha: str) -> dict[s
 
     `claim_status_sha` should be the TaskStatus(working) the heartbeat is for —
     it lets a sweeper distinguish heartbeats from a dead claim cycle from those
-    of a fresh one.
+    of a fresh one. Concurrent heartbeats race-resolve via hashharness's
+    ``chain_predecessor`` on ``prevHeartbeat``.
     """
     prev = latest_heartbeat(task_sha)
-    links: dict[str, Any] = {"task": task_sha, "claimStatus": claim_status_sha}
+    links: dict[str, Any] = {
+        "task": _link_record_sha_for(task_sha),
+        "claimStatus": claim_status_sha,
+    }
     if prev:
-        links["prevHeartbeat"] = prev["text_sha256"]
+        links["prevHeartbeat"] = prev["record_sha256"]
     text = f"hb:{task_sha[:8]}:{agent}\n#nonce:{secrets.token_hex(8)}"
-    return mcp_client.tool(
+    wp = task_wp(task_sha)
+    result, err = mcp_client.tool_safe(
         "create_item",
         {
             "type": "TaskHeartbeat",
-            "work_package_id": task_wp(task_sha),
-            "created_at": now_iso(),
+            "work_package_id": wp,
             "title": f"hb {task_sha[:8]} {agent}",
             "text": text,
             "attributes": {"agent": agent},
@@ -452,6 +496,11 @@ def append_heartbeat(task_sha: str, agent: str, claim_status_sha: str) -> dict[s
             "return": "full",
         },
     )
+    if err is not None:
+        if _is_head_moved(err):
+            raise HeadMoved(wp, "TaskHeartbeat", mcp_error=err)
+        raise RuntimeError(f"create_item failed: {err}")
+    return result
 
 
 def last_activity_at(task_sha: str) -> str | None:
@@ -485,29 +534,16 @@ def cancel_task(
     (see cancel.py).
     """
     body = f"cancelled by {cancelled_by}: {reason}"
-    report = append_report(task_sha, title=f"cancelled: {task_sha[:8]}", text=f"{body}\n#nonce:{secrets.token_hex(8)}")
-
-    prev = latest_status(task_sha)
-    links: dict[str, Any] = {"task": task_sha, "proof": report["text_sha256"]}
-    if prev:
-        links["prevStatus"] = prev["text_sha256"]
-    status_text = f"{body}\n#nonce:{secrets.token_hex(8)}"
-    status = mcp_client.tool(
-        "create_item",
-        {
-            "type": "TaskStatus",
-            "work_package_id": task_wp(task_sha),
-            "created_at": now_iso(),
-            "title": f"cancelled: {task_sha[:8]}",
-            "text": status_text,
-            "attributes": {
-                "status": "rejected",
-                "cancelled": True,
-                "cancelled_by": cancelled_by,
-                "cancel_reason": reason,
-            },
-            "links": links,
-            "return": "full",
+    report = append_report(task_sha, title=f"cancelled: {task_sha[:8]}", text=body)
+    status = append_status(
+        task_sha,
+        "rejected",
+        note=body,
+        proof_report_sha=report["record_sha256"],
+        extra_attrs={
+            "cancelled": True,
+            "cancelled_by": cancelled_by,
+            "cancel_reason": reason,
         },
     )
     return {"report": report, "status": status}
@@ -562,46 +598,38 @@ def reclaim(task_sha: str, *, reason: str = "stale lease", reclaimer: str = "swe
     from a genesis ``new`` event. Only meaningful when the latest status is
     ``working``; sweep.py enforces that precondition.
     """
-    prev = latest_status(task_sha)
-    links: dict[str, Any] = {"task": task_sha}
-    if prev:
-        links["prevStatus"] = prev["text_sha256"]
     body = f"reclaimed by {reclaimer}: {reason}"
-    text = f"{body}\n#nonce:{secrets.token_hex(8)}"
-    return mcp_client.tool(
-        "create_item",
-        {
-            "type": "TaskStatus",
-            "work_package_id": task_wp(task_sha),
-            "created_at": now_iso(),
-            "title": f"reclaimed: {task_sha[:8]}",
-            "text": text,
-            "attributes": {"status": "new", "reclaimed": True, "reclaimer": reclaimer},
-            "links": links,
-            "return": "full",
-        },
+    return append_status(
+        task_sha,
+        "new",
+        note=body,
+        extra_attrs={"reclaimed": True, "reclaimer": reclaimer},
     )
 
 
 def append_report(task_sha: str, title: str, text: str) -> dict[str, Any]:
     prev = latest_report(task_sha)
-    links: dict[str, Any] = {"task": task_sha}
+    links: dict[str, Any] = {"task": _link_record_sha_for(task_sha)}
     if prev:
-        links["prevReport"] = prev["text_sha256"]
-    # Two reports with the same body bytes (across any task) would
-    # otherwise collide on `text_sha256` and hashharness rejects the
-    # duplicate. The `#nonce:` footer mirrors the trick used in
-    # append_status; auditable facts live in `created_at` and `links`.
+        links["prevReport"] = prev["record_sha256"]
+    # `#nonce:` footer keeps `text_sha256` unique when two reports share
+    # the same body bytes. Concurrent appends race-resolve via
+    # hashharness's `chain_predecessor` on `prevReport`.
     body = f"{text}\n#nonce:{secrets.token_hex(8)}"
-    return mcp_client.tool(
+    wp = task_wp(task_sha)
+    result, err = mcp_client.tool_safe(
         "create_item",
         {
             "type": "TaskReport",
-            "work_package_id": task_wp(task_sha),
-            "created_at": now_iso(),
+            "work_package_id": wp,
             "title": title,
             "text": body,
             "links": links,
             "return": "full",
         },
     )
+    if err is not None:
+        if _is_head_moved(err):
+            raise HeadMoved(wp, "TaskReport", mcp_error=err)
+        raise RuntimeError(f"create_item failed: {err}")
+    return result

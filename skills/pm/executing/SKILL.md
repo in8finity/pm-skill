@@ -1,13 +1,13 @@
 ---
-name: planning-executing
+name: pm-executing
 description: >
   Claim a task for execution. Appends a TaskStatus(working) chained to the
   previous status of that task. Refuses if the task is not currently in
   state "new" (prevents two workers claiming the same task). Use when an
-  agent picks up a task returned by planning:next.
+  agent picks up a task returned by pm:next.
 ---
 
-# planning:executing — mark a task as working
+# pm:executing — mark a task as working
 
 ## Procedure
 
@@ -18,11 +18,12 @@ description: >
 - Appends a new TaskStatus with `attributes.status = "working"`,
   `attributes.agent = <agent-id>`, `links.task = <task-sha>`,
   `links.prevStatus = <previous-status-sha>`.
-- The claim TaskStatus uses deterministic text
-  `claim:<task>/<prev-status>`. Two claimants racing off the same
-  previous tip therefore collide on `text_sha256`; hashharness accepts
-  exactly one create and the loser exits with code 8 (**claim race
-  lost**) — caller MUST drop the task.
+- `prevStatus` is declared `chain_predecessor` in the schema, so
+  hashharness compare-and-swaps the TaskStatus head for this task on
+  every append: two claimants racing off the same previous tip both
+  submit the same `prevStatus`, exactly one append wins, the other is
+  rejected with 'head moved' which the script surfaces as exit 8
+  (**claim race lost**) — caller MUST drop the task.
 - On success (exit 0), prints the created TaskStatus as JSON.
 
 ## Exit codes
@@ -35,11 +36,12 @@ description: >
 
 ## Concurrency note
 
-hashharness items are immutable and identified by `sha256(text)`. The
-claim path intentionally does **not** use a random nonce: the text is
-fully determined by `(task, prevStatus)`. Two parallel claimants aiming
-at the same predecessor therefore produce the same `text_sha256`, and
-hashharness rejects the second create.
+The TaskStatus type declares `prevStatus` as a `chain_predecessor` link
+in the planning schema. On every `create_item`, hashharness atomically
+checks that `prevStatus` equals the current head record_sha256 for this
+task's TaskStatus chain, advances the head if so, and rejects with
+'head moved' otherwise. Two parallel claimants observing the same tip
+therefore both submit the same `prevStatus`; exactly one append wins.
 
 This race-safety is **structurally enforced** by the store plus script
 (exit 8). It matches the formal model's `commitClaim` / `abortClaim`

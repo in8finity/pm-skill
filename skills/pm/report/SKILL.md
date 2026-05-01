@@ -1,14 +1,14 @@
 ---
-name: report
+name: pm-report
 description: >
   Append a TaskReport (proof of work / progress note) to a task. Reports are
   immutable and chained: each new report links prevReport to the previous
-  one. A report is required before planning:finished will accept the task.
+  one. A report is required before pm:finished will accept the task.
   Use when an agent finishes its work and produces output, or when capturing
   partial progress mid-execution.
 ---
 
-# planning:report — submit a report on a task
+# pm:report — submit a report on a task
 
 ## Procedure
 
@@ -22,4 +22,4 @@ description: >
 - The report body is the proof of work: include outputs, file paths,
   diffs, test results — whatever evidence justifies completion.
 - Multiple reports per task are allowed (e.g. interim updates). The last
-  report is the one that `planning:finished` will reference as `proof`.
+  report is the one that `pm:finished` will reference as `proof`.

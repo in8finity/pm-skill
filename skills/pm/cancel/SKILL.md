@@ -1,5 +1,5 @@
 ---
-name: planning-cancel
+name: pm-cancel
 description: >
   Cancel a task as a supervisor or planner override. Writes a synthetic
   TaskReport carrying the cancel reason, then appends a terminal
@@ -8,7 +8,7 @@ description: >
   task's cancellation should cascade into unfinished subtasks.
 ---
 
-# planning:cancel — supervisor cancel with proof
+# pm:cancel — supervisor cancel with proof
 
 ## Procedure
 
@@ -44,5 +44,5 @@ every terminal status carries evidence.
 
 ## Ownership note
 
-Unlike `planning:finished`, cancellation does **not** require the current
+Unlike `pm:finished`, cancellation does **not** require the current
 worker to be the closer. It is a supervisor/planner override by design.

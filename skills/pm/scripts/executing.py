@@ -8,12 +8,13 @@ Exit codes:
   0  — claim won, agent owns this task
   6  — pre-claim refusal: task is already not ``new``
   8  — claim race lost: another agent claimed off the same prev-tip first
-       (hashharness rejected our deterministic-text TaskStatus on collision)
+       (hashharness's `chain_predecessor` compare-and-swap on `prevStatus`
+       rejected our append with 'head moved')
   10 — sticky-context refusal: task is sticky and PM_CONTEXT_ID either is
        unset or doesn't match the bound context of an ancestor/dep
 
-Race-safety: deterministic claim text — see ``system-models/reports/
-cache-staleness-investigation.md``.
+Race-safety: native `chain_predecessor` head-move check on the
+TaskStatus chain — see ``system-models/reports/planning-enforcement.md``.
 
 Sticky tasks: if ``Task.attributes.sticky`` is set, ``$PM_CONTEXT_ID``
 must match (and not conflict with) the contexts bound to any sticky
@@ -50,7 +51,7 @@ def main() -> int:
         sys.stderr.write(f"refusing: task {args.task[:12]} status is '{current}', expected 'new'\n")
         return 6
 
-    prev_sha = latest_before["text_sha256"]
+    prev_sha = latest_before["record_sha256"]
     agent_context = os.environ.get("PM_CONTEXT_ID") or None
 
     task = store.get_task(args.task)

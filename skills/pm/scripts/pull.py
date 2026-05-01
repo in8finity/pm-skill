@@ -67,19 +67,14 @@ def main() -> int:
             return 0  # queue empty
 
         sha = candidate["text_sha256"]
-        # Race-safe claim: append working status, then re-read tip; if it
-        # is not ours, treat as lost and try again.
-        prev_text_sha = store.latest_status(sha)["text_sha256"]
-        new_status = store.append_status(sha, "working", note=f"claimed for execution")
-        tip = store.latest_status(sha)
-        if not tip or tip["text_sha256"] != new_status["text_sha256"]:
-            # someone else's status overtook ours
+        # Race-safe claim: hashharness's native `chain_predecessor` on
+        # `prevStatus` compare-and-swaps the head; if another agent
+        # claimed first, append_claim raises ClaimLost and we retry.
+        prev_record_sha = store.latest_status(sha)["record_sha256"]
+        try:
+            store.append_claim(sha, "pull", prev_record_sha)
+        except store.ClaimLost:
             sys.stderr.write(f"pull: race lost on {sha[:16]} (attempt {attempt+1}/{args.max_retries+1})\n")
-            continue
-        # Also defend against the prev-not-being-new case (shouldn't happen
-        # because next.py filtered, but be safe):
-        if prev_text_sha != tip["links"].get("prevStatus", ""):
-            sys.stderr.write(f"pull: prevStatus mismatch on {sha[:16]}\n")
             continue
 
         slug = (candidate.get("attributes") or {}).get("slug") or ""

@@ -1,5 +1,5 @@
 ---
-name: planning-execute
+name: pm-execute
 description: >
   Run N worker agents in parallel that drain the planning queue. Each worker
   loops: pull next task -> claim it (executing) -> do the work -> submit a
@@ -8,7 +8,7 @@ description: >
   specific agent count.
 ---
 
-# planning:execute — run N agents against the queue
+# pm:execute — run N agents against the queue
 
 ## Inputs
 

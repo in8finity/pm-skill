@@ -42,7 +42,7 @@ def main() -> int:
         )
         return 6
 
-    hb = store.append_heartbeat(args.task, args.agent, latest["text_sha256"])
+    hb = store.append_heartbeat(args.task, args.agent, latest["record_sha256"])
     print(json.dumps(hb, indent=2))
     return 0
 

@@ -7,13 +7,13 @@ chain of immutable items.
 
 | Skill              | Purpose                                                       |
 |--------------------|---------------------------------------------------------------|
-| `planning:plan`     | Enqueue a Task (+ genesis TaskStatus=`new`)                  |
-| `planning:next`     | Return the next runnable Task, or `null`                     |
-| `planning:executing`| Claim a Task → TaskStatus=`working`                          |
-| `planning:report`   | Append TaskReport (proof of work; chained per task)          |
-| `planning:finished` | Close a Task → TaskStatus=`done` (or `rejected`) with proof  |
-| `planning:cancel`   | Supervisor cancel → synthetic proof + TaskStatus=`rejected`  |
-| `planning:execute`  | Spawn N parallel agents that drain the queue                 |
+| `pm:plan`     | Enqueue a Task (+ genesis TaskStatus=`new`)                  |
+| `pm:next`     | Return the next runnable Task, or `null`                     |
+| `pm:executing`| Claim a Task → TaskStatus=`working`                          |
+| `pm:report`   | Append TaskReport (proof of work; chained per task)          |
+| `pm:finished` | Close a Task → TaskStatus=`done` (or `rejected`) with proof  |
+| `pm:cancel`   | Supervisor cancel → synthetic proof + TaskStatus=`rejected`  |
+| `pm:execute`  | Spawn N parallel agents that drain the queue                 |
 
 ## Storage model (hashharness types)
 
@@ -58,7 +58,7 @@ The scripts read `HASHHARNESS_MCP_URL` (default `http://127.0.0.1:38417/mcp`).
 
 - `proof` link on a `done`/`rejected` TaskStatus is **mandatory** — finished.py
   refuses if there is no TaskReport on the task.
-- `planning:cancel` preserves the same audit rule by synthesizing a
+- `pm:cancel` preserves the same audit rule by synthesizing a
   TaskReport for the cancel reason, then linking `proof` from the
   cancelling `rejected` status.
 - A subtask must be created with `--parent`; plan.py will read the parent's

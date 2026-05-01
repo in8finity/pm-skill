@@ -254,8 +254,9 @@ def g5_workdir_isolation() -> None:
 
 def g6_claim_race() -> None:
     """G6: two parallel `pm executing` against one `new` task → exactly
-    one wins (exit 0), the other loses (exit 8). Deterministic claim
-    text + content-addressed insert is the safety guarantee."""
+    one wins (exit 0), the other loses (exit 8). Hashharness's native
+    `chain_predecessor` head-move check on `prevStatus` is the safety
+    guarantee."""
     q = fresh_queue("g6")
     plan = json.loads(pm("plan", "--queue", q, "--title", "race",
                          "--text", "claim me",
@@ -547,6 +548,45 @@ def g15_spawned_at_links_current_status() -> None:
               "G15 spawnedAt must point at parent's current working status")
 
 
+def g16_finished_without_report() -> None:
+    """G16: claim a task, then `pm finished` with no TaskReport on the
+    chain → exit 7, task stays `working`. Closes the proof-gate
+    coverage gap (G3b only covers exit 9, where a report exists)."""
+    q = fresh_queue("g16")
+    sha = json.loads(pm("plan", "--queue", q, "--title", "g16",
+                        "--text", "no report",
+                        env_extra={"PM_WORKDIR": ""}).stdout
+                     )["task"]["text_sha256"]
+    pm("executing", "--task", sha)
+    p = pm("finished", "--task", sha, check=False)
+    assert_eq(p.returncode, 7,
+              f"G16 expected exit 7 with no report; got {p.returncode}")
+    assert_eq(store.status_value(store.latest_status(sha)), "working",
+              "G16 task must remain in working after refused finish")
+
+
+def g17_cancel_terminal_refused() -> None:
+    """G17: drive a task to `done`, then `pm cancel` it → exit 6, task
+    stays `done`. Closes the cancellation-gate refusal coverage gap
+    (G11 only covers the cascade-success path)."""
+    q = fresh_queue("g17")
+    sha = json.loads(pm("plan", "--queue", q, "--title", "g17",
+                        "--text", "cancel-after-done",
+                        env_extra={"PM_WORKDIR": ""}).stdout
+                     )["task"]["text_sha256"]
+    pm("executing", "--task", sha)
+    pm("report", "--task", sha, "--title", "g17 done", "--text", "ok")
+    pm("finished", "--task", sha)
+    assert_eq(store.status_value(store.latest_status(sha)), "done",
+              "G17 setup: task must be done before cancel attempt")
+    p = pm("cancel", "--task", sha,
+           "--reason", "G17 should be refused", check=False)
+    assert_eq(p.returncode, 6,
+              f"G17 expected exit 6 cancelling terminal task; got {p.returncode}")
+    assert_eq(store.status_value(store.latest_status(sha)), "done",
+              "G17 task must remain done after refused cancel")
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -568,6 +608,8 @@ ALL_FLOWS = {
     "G13": g13_heartbeat_sweep,
     "G14": g14_dep_gate_rejected_blocks,
     "G15": g15_spawned_at_links_current_status,
+    "G16": g16_finished_without_report,
+    "G17": g17_cancel_terminal_refused,
 }
 
 
