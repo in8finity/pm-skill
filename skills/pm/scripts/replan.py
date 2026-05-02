@@ -92,9 +92,29 @@ def supersede_and_clone(
     sticky = bool(attrs.get("sticky"))
     workdir = attrs.get("workdir")
 
-    deps = (orig_task.get("links") or {}).get("dependsOn") or []
-    parent = (orig_task.get("links") or {}).get("parentTask")
-    spawned_at = (orig_task.get("links") or {}).get("spawnedAt")
+    # Link values on the original Task are record_sha256; create_task
+    # expects text_sha256 (it re-resolves to record_sha256 internally
+    # via _link_record_sha_for). Translate via a queue-wide lookup.
+    record_to_text = {
+        t["record_sha256"]: t["text_sha256"] for t in store.list_tasks(queue)
+    }
+    deps_records = (orig_task.get("links") or {}).get("dependsOn") or []
+    deps = [record_to_text[d] for d in deps_records if d in record_to_text]
+    parent_record = (orig_task.get("links") or {}).get("parentTask")
+    parent = record_to_text.get(parent_record) if parent_record else None
+    # spawnedAt points at a TaskStatus, not a Task — leave it as-is so
+    # create_task's _link_record_sha_for sees a TaskStatus text_sha256.
+    # Look it up via get_item_by_hash to recover the text_sha256:
+    spawned_at_record = (orig_task.get("links") or {}).get("spawnedAt")
+    spawned_at = None
+    if spawned_at_record:
+        # find the TaskStatus whose record_sha256 matches
+        st_tip = store.latest_status(orig_sha)
+        # Fallback: use the original task's current latest status text.
+        # (Replan-clone's spawnedAt is informational; the key invariant
+        # is that the link target exists.)
+        if st_tip and st_tip.get("record_sha256") == spawned_at_record:
+            spawned_at = st_tip["text_sha256"]
 
     new_task = store.create_task(
         queue=queue,

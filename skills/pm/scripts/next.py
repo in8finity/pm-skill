@@ -40,12 +40,23 @@ def main() -> int:
     tasks = store.list_tasks(args.queue)
     tasks.sort(key=lambda t: t.get("created_at", ""))
 
+    # Link values are record_sha256 (hashharness link contract); we key
+    # status lookups off text_sha256, so build a one-shot translation.
+    record_to_text = {t["record_sha256"]: t["text_sha256"] for t in tasks}
+
     status_cache: dict[str, str | None] = {}
 
     def status_of(sha: str) -> str | None:
         if sha not in status_cache:
             status_cache[sha] = store.status_value(store.latest_status(sha))
         return status_cache[sha]
+
+    def dep_done(d_record: str) -> bool:
+        d_text = record_to_text.get(d_record)
+        if d_text is None:
+            # Cross-queue dep or dangling reference — treat as not-done.
+            return False
+        return status_of(d_text) == "done"
 
     for t in tasks:
         sha = t["text_sha256"]
@@ -55,7 +66,7 @@ def main() -> int:
         if status_of(sha) != "new":
             continue
         deps = (t.get("links") or {}).get("dependsOn") or []
-        if any(status_of(d) != "done" for d in deps):
+        if not all(dep_done(d) for d in deps):
             continue
         print(json.dumps(t, indent=2))
         return 0

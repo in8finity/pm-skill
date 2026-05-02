@@ -90,7 +90,8 @@ def g1_fresh_plan_execute_finish() -> None:
               "done", "G1 final status")
     final = store.latest_status(task_sha)
     proof = (final.get("links") or {}).get("proof")
-    assert_eq(proof, report["text_sha256"], "G1 proof link points at report")
+    # Link values are record_sha256 per hashharness contract.
+    assert_eq(proof, report["record_sha256"], "G1 proof link points at report")
 
 
 def g2_chained_deps_pull_order() -> None:
@@ -222,7 +223,9 @@ def g4_subtask_inherits_parent_workdir() -> None:
                   "G4 child workdir must inherit parent's, not cwd")
         assert_eq(child_attrs.get("sticky"), True,
                   "G4 child should inherit sticky from parent")
-        assert_eq(child_links.get("parentTask"), parent_sha,
+        # Link values are record_sha256 per hashharness contract.
+        parent_record_sha = store.get_task(parent_sha)["record_sha256"]
+        assert_eq(child_links.get("parentTask"), parent_record_sha,
                   "G4 child.parentTask must link to parent")
         assert child_links.get("spawnedAt"), \
             "G4 child.spawnedAt must point at parent's working status"
@@ -537,14 +540,15 @@ def g15_spawned_at_links_current_status() -> None:
         env_extra={"PM_WORKDIR": ""},
     ).stdout)["task"]["text_sha256"]
     pm("executing", "--task", parent)
-    parent_working_sha = store.latest_status(parent)["text_sha256"]
+    # Link values are record_sha256 per hashharness contract.
+    parent_working_record_sha = store.latest_status(parent)["record_sha256"]
 
     child = json.loads(pm(
         "plan", "--queue", q, "--title", "C", "--text", "child",
         "--parent", parent, env_extra={"PM_WORKDIR": ""},
     ).stdout)["task"]
     spawned = (child.get("links") or {}).get("spawnedAt")
-    assert_eq(spawned, parent_working_sha,
+    assert_eq(spawned, parent_working_record_sha,
               "G15 spawnedAt must point at parent's current working status")
 
 
@@ -606,6 +610,75 @@ def g18_self_loop_dep_refused() -> None:
         "G18 task must not exist after self-loop refusal"
 
 
+def g20_heartbeat_wins_reclaim_race() -> None:
+    """G20: simulate the TTL-window race — sweep snapshots the heartbeat
+    tip BEFORE the worker heartbeats, then attempts reclaim. With the
+    preempt-heartbeat protocol, `chain_predecessor` on `prevHeartbeat`
+    rejects the preempt → WorkerStillAlive → task stays `working`.
+    Closes the heartbeat-vs-reclaim race."""
+    q = fresh_queue("g20")
+    sha = json.loads(pm("plan", "--queue", q, "--title", "g20",
+                        "--text", "race victim",
+                        env_extra={"PM_WORKDIR": ""}).stdout
+                     )["task"]["text_sha256"]
+    pm("executing", "--task", sha)
+
+    # Sweeper would have observed the heartbeat tip BEFORE the worker
+    # heartbeated — capture that snapshot now.
+    prev_hb = store.latest_heartbeat(sha)
+    prev_hb_sha = prev_hb["record_sha256"] if prev_hb else None
+
+    # Worker heartbeats — extending the chain past the sweeper's snapshot.
+    pm("heartbeat", "--task", sha)
+
+    # Sweeper attempts reclaim with the now-stale snapshot.
+    try:
+        store.reclaim(
+            sha,
+            reason="g20 stale-snapshot reclaim attempt",
+            reclaimer="g20-sweeper",
+            preempt_heartbeat=True,
+            preempt_prev_heartbeat_sha=prev_hb_sha,
+        )
+        raise AssertionError(
+            "G20 reclaim should have raised WorkerStillAlive"
+        )
+    except store.WorkerStillAlive:
+        pass
+
+    # Task must remain working — worker not evicted.
+    assert_eq(store.status_value(store.latest_status(sha)), "working",
+              "G20 task must remain working after raced reclaim is refused")
+
+
+def g21_sweep_wins_with_no_concurrent_heartbeat() -> None:
+    """G21: counterpart to G20 — when no heartbeat races, the preempt
+    commits and the reclaim status follows. Ensures the preempt mechanism
+    isn't a regression on the dead-worker recovery path."""
+    q = fresh_queue("g21")
+    sha = json.loads(pm("plan", "--queue", q, "--title", "g21",
+                        "--text", "sweep wins",
+                        env_extra={"PM_WORKDIR": ""}).stdout
+                     )["task"]["text_sha256"]
+    pm("executing", "--task", sha)
+
+    prev_hb = store.latest_heartbeat(sha)
+    prev_hb_sha = prev_hb["record_sha256"] if prev_hb else None
+
+    # No worker heartbeat in between — sweeper preempt should commit.
+    result = store.reclaim(
+        sha,
+        reason="g21 dead-worker recovery",
+        reclaimer="g21-sweeper",
+        preempt_heartbeat=True,
+        preempt_prev_heartbeat_sha=prev_hb_sha,
+    )
+    assert_eq(store.status_value(store.latest_status(sha)), "new",
+              "G21 task must be reclaimed to new")
+    assert (result.get("attributes") or {}).get("reclaimed"), \
+        "G21 reclaim status must carry reclaimed=true"
+
+
 def g19_nonexistent_dep_refused() -> None:
     """G19: `pm plan --depends-on <bogus-sha>` exits 11 (forever-blocked
     deps refused at plan time, not silently created)."""
@@ -645,6 +718,8 @@ ALL_FLOWS = {
     "G17": g17_cancel_terminal_refused,
     "G18": g18_self_loop_dep_refused,
     "G19": g19_nonexistent_dep_refused,
+    "G20": g20_heartbeat_wins_reclaim_race,
+    "G21": g21_sweep_wins_with_no_concurrent_heartbeat,
 }
 
 

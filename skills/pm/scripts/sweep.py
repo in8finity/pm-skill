@@ -57,6 +57,7 @@ def main() -> int:
     scanned = 0
     stale: list[dict[str, str]] = []
     reclaimed: list[dict[str, str]] = []
+    raced: list[dict[str, str]] = []
 
     for t in tasks:
         scanned += 1
@@ -72,6 +73,16 @@ def main() -> int:
         if age <= args.ttl:
             continue
 
+        # Snapshot the heartbeat tip at decision time. The reclaim call
+        # uses it as `prevHeartbeat` for a preempt heartbeat — if a
+        # worker raced and committed a heartbeat between this snapshot
+        # and the reclaim append, `chain_predecessor` rejects the
+        # preempt and `store.reclaim` raises WorkerStillAlive. Closes
+        # the TTL-window race documented in
+        # system-models/reports/planning-blind-spots.md.
+        prev_hb = store.latest_heartbeat(sha)
+        prev_hb_sha = prev_hb["record_sha256"] if prev_hb else None
+
         slug = (t.get("attributes") or {}).get("slug", "?")
         entry = {
             "task": sha,
@@ -82,11 +93,21 @@ def main() -> int:
         stale.append(entry)
         if args.dry_run:
             continue
-        result = store.reclaim(
-            sha,
-            reason=f"no activity for {int(age)}s (ttl={args.ttl})",
-            reclaimer=args.reclaimer,
-        )
+        try:
+            result = store.reclaim(
+                sha,
+                reason=f"no activity for {int(age)}s (ttl={args.ttl})",
+                reclaimer=args.reclaimer,
+                preempt_heartbeat=True,
+                preempt_prev_heartbeat_sha=prev_hb_sha,
+            )
+        except store.WorkerStillAlive:
+            raced.append(entry)
+            sys.stderr.write(
+                f"sweep: skipping {sha[:12]} ({slug}) — heartbeat raced "
+                f"the freshness snapshot; worker still alive\n"
+            )
+            continue
         reclaimed.append({**entry, "reclaim_status_sha": result["text_sha256"]})
 
     print(json.dumps(
@@ -94,6 +115,7 @@ def main() -> int:
             "scanned": scanned,
             "stale": len(stale),
             "reclaimed": reclaimed if not args.dry_run else stale,
+            "raced": raced,
             "dry_run": args.dry_run,
             "ttl": args.ttl,
         },

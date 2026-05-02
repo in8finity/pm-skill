@@ -57,6 +57,29 @@ class HeadMoved(Exception):
         )
 
 
+class WorkerStillAlive(Exception):
+    """Raised when a reclaim attempt's preempt-heartbeat is rejected by
+    `chain_predecessor` — a worker's heartbeat raced the sweeper's
+    freshness snapshot. The sweep should abort the reclaim and leave the
+    task to its (still-live) owner.
+
+    Closes the TTL-window race where the sweeper observes age > TTL,
+    then a heartbeat arrives, then the sweeper appends the reclaim
+    status — wrongly evicting a live worker.
+    """
+    def __init__(self, task_sha: str,
+                 expected_prev_heartbeat_sha: str | None,
+                 mcp_error: dict[str, Any] | None = None) -> None:
+        self.task_sha = task_sha
+        self.expected_prev_heartbeat_sha = expected_prev_heartbeat_sha
+        self.mcp_error = mcp_error
+        super().__init__(
+            f"worker still alive on {task_sha[:12]} — "
+            f"heartbeat raced sweeper's snapshot "
+            f"(expected_prev={(expected_prev_heartbeat_sha or '<none>')[:12]})"
+        )
+
+
 class ClaimLost(Exception):
     """Raised when append_claim fails because another agent claimed off the
     same prev-tip first. Now a thin re-classification of HeadMoved on the
@@ -73,10 +96,22 @@ class ClaimLost(Exception):
 
 
 def _is_head_moved(err: dict[str, Any] | None) -> bool:
+    """Detect hashharness's chain_predecessor head-mismatch rejection.
+
+    Two phrasings are emitted depending on the rejection branch:
+      * "head moved" / "head has moved" — when our supplied prev no
+         longer matches the live head;
+      * "must equal current head" — when prev is supplied stale, or
+         omitted while a head exists.
+    """
     if not err:
         return False
     msg = str(err.get("message", err)).lower()
-    return "head moved" in msg or "head has moved" in msg
+    return (
+        "head moved" in msg
+        or "head has moved" in msg
+        or "must equal current head" in msg
+    )
 
 
 def queue_wp(queue: str) -> str:
@@ -550,11 +585,20 @@ def cancel_task(
 
 
 def find_undone_subtasks(parent_sha: str, queue: str) -> list[dict[str, Any]]:
-    """Return Tasks whose ``links.parentTask == parent_sha`` and whose
-    latest status is not in {done, rejected}. Used by cancel.py --cascade."""
+    """Return Tasks whose ``links.parentTask`` points at ``parent_sha`` and
+    whose latest status is not in {done, rejected}. Used by cancel.py
+    --cascade.
+
+    Link values are ``record_sha256`` (hashharness link contract), so we
+    resolve the parent's record_sha256 once and compare against that.
+    """
+    parent = get_task(parent_sha)
+    if parent is None:
+        return []
+    parent_record_sha = parent["record_sha256"]
     children: list[dict[str, Any]] = []
     for t in list_tasks(queue):
-        if (t.get("links") or {}).get("parentTask") != parent_sha:
+        if (t.get("links") or {}).get("parentTask") != parent_record_sha:
             continue
         sha = t["text_sha256"]
         cur = status_value(latest_status(sha))
@@ -565,12 +609,25 @@ def find_undone_subtasks(parent_sha: str, queue: str) -> list[dict[str, Any]]:
 
 
 def find_dependency_ancestors(task_sha: str) -> list[str]:
-    """Return all ancestor task shas reachable via ``links.dependsOn``.
+    """Return all ancestor task ``text_sha256`` values reachable via
+    ``links.dependsOn``.
 
-    Topologically deep-first; the closest ancestor (immediate dep) appears
-    first, the most upstream last. Cycles are broken by a visited set.
-    Used by replan.py to reset the chain leading up to a stuck task.
+    Link values are ``record_sha256`` (hashharness link contract); we
+    walk the originating queue once to build a record_sha → text_sha
+    lookup so the returned shas are usable with ``get_task`` /
+    ``latest_status`` (which key off text_sha256).
+
+    Topologically deep-first; closest ancestor first, most upstream
+    last. Cycles are broken by a visited set. Used by replan.py to
+    reset the chain leading up to a stuck task.
     """
+    root = get_task(task_sha)
+    if root is None:
+        return []
+    queue = (root.get("attributes") or {}).get("queue", "default")
+    record_to_text = {
+        t["record_sha256"]: t["text_sha256"] for t in list_tasks(queue)
+    }
     out: list[str] = []
     visited: set[str] = {task_sha}
 
@@ -579,8 +636,9 @@ def find_dependency_ancestors(task_sha: str) -> list[str]:
         if task is None:
             return
         deps = (task.get("links") or {}).get("dependsOn") or []
-        for d in deps:
-            if d in visited:
+        for d_record in deps:
+            d = record_to_text.get(d_record)
+            if d is None or d in visited:
                 continue
             visited.add(d)
             out.append(d)
@@ -590,14 +648,74 @@ def find_dependency_ancestors(task_sha: str) -> list[str]:
     return out
 
 
-def reclaim(task_sha: str, *, reason: str = "stale lease", reclaimer: str = "sweeper") -> dict[str, Any]:
+def reclaim(
+    task_sha: str,
+    *,
+    reason: str = "stale lease",
+    reclaimer: str = "sweeper",
+    preempt_heartbeat: bool = False,
+    preempt_prev_heartbeat_sha: str | None = None,
+) -> dict[str, Any]:
     """Append a TaskStatus(new, reclaimed=true) recycling a zombie task.
 
     Mirrors the Reclaim transition in planning_lease.als: phase' = PNew, no owner.
     The new status carries ``attributes.reclaimed = true`` so it's distinguishable
     from a genesis ``new`` event. Only meaningful when the latest status is
     ``working``; sweep.py enforces that precondition.
+
+    Race-safety against live workers (sweep usage):
+      Pass ``preempt_heartbeat=True`` along with the heartbeat tip's
+      ``record_sha256`` (or None if no prior heartbeat) that the sweeper
+      observed at freshness-snapshot time. Reclaim then appends a
+      "preempt" TaskHeartbeat first, with ``prevHeartbeat`` set to the
+      observed tip. If a worker raced and committed a heartbeat in
+      between, hashharness's ``chain_predecessor`` on ``prevHeartbeat``
+      rejects the preempt with 'head moved' — surfaced as
+      ``WorkerStillAlive`` so the sweeper aborts cleanly. If no race,
+      the preempt commits and the reclaim status follows.
+
+      Without ``preempt_heartbeat=True`` (default), reclaim is
+      unconditional — used by supervisor flows that don't need to
+      respect liveness (e.g. ``cancel.py --cascade``).
     """
+    if preempt_heartbeat:
+        preempt_text = (
+            f"preempt:{task_sha[:8]}:{reclaimer}\n#nonce:{secrets.token_hex(8)}"
+        )
+        links: dict[str, Any] = {
+            "task": _link_record_sha_for(task_sha),
+        }
+        if preempt_prev_heartbeat_sha is not None:
+            links["prevHeartbeat"] = preempt_prev_heartbeat_sha
+        wp = task_wp(task_sha)
+        # `claimStatus` is required by the schema (single-link), so we
+        # point it at the current working status — same one whose lease
+        # we're about to break. If a worker is mid-claim and a fresh
+        # `working` has just been committed (re-claim race), the link
+        # target is still valid but the freshness snapshot would have
+        # noticed the new status's age was within TTL anyway.
+        cur_status = latest_status(task_sha)
+        if cur_status is not None:
+            links["claimStatus"] = cur_status["record_sha256"]
+        result, err = mcp_client.tool_safe(
+            "create_item",
+            {
+                "type": "TaskHeartbeat",
+                "work_package_id": wp,
+                "title": f"sweep-preempt {task_sha[:8]}",
+                "text": preempt_text,
+                "attributes": {"agent": reclaimer, "preempt": True},
+                "links": links,
+                "return": "full",
+            },
+        )
+        if err is not None:
+            if _is_head_moved(err):
+                raise WorkerStillAlive(
+                    task_sha, preempt_prev_heartbeat_sha, mcp_error=err
+                )
+            raise RuntimeError(f"preempt-heartbeat create_item failed: {err}")
+
     body = f"reclaimed by {reclaimer}: {reason}"
     return append_status(
         task_sha,
