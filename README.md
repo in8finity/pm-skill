@@ -1,6 +1,6 @@
 # hashharness-pm
 
-A planning board for parallel agents — thirteen Claude Code skills + a `pm` CLI dispatcher backed by [hashharness](https://github.com/in8finity/hashharness)'s append-only hash-chained storage.
+A planning board for parallel agents — fourteen Claude Code skills + a `pm` CLI dispatcher backed by [hashharness](https://github.com/in8finity/hashharness)'s append-only hash-chained storage.
 
 The system was designed against a formal model. The model is in this repo. Three structural fixes that landed (claim race-safety, slug uniqueness, and the migration of claim-race resolution to hashharness's native `chain_predecessor` head-move check) were each driven by counterexamples or properties the model produced before the code changed.
 
@@ -16,9 +16,10 @@ Treat the queue as a first-class planning surface for an agent (or a human super
 
 ### 2. Executing a skill in a controlled manner
 
-Two skills wrap the queue to drive *another* skill's documented flow as a sequence of tasks (one task per SKILL.md step, chained by `dependsOn`):
+Three skills wrap the queue to drive *another* skill's documented flow as a sequence of tasks (one task per SKILL.md step, chained by `dependsOn`):
 
-- **Auto** (`pm-auto-skill-execution`) — hands-off run. Every choice the target skill would normally ask the user about is resolved to its documented default; the choice and reasoning are recorded in the task report. Best for routine runs, batch processing, and well-understood skills.
+- **Auto** (`pm-auto-skill-execution`) — hands-off run. Every choice the target skill would normally ask the user about is resolved to its documented default; the choice and reasoning are recorded in the task report. Auto rejects steps whose preconditions can't be satisfied automatically. Best for routine runs, batch processing, and well-understood skills.
+- **Assisted** (`pm-assisted-skill-execution`) — default-pick at routine gates, pause-and-ask at critical ones. Doesn't auto-reject when a decision is required; escalates to the user instead and resumes once answered. Best for mostly-routine runs that may need 1–3 user inputs (the everyday mode for skills you understand most of, but not all).
 - **Guided** (`pm-guided-skill-execution`) — step-by-step with user-in-the-loop gates. Pauses after each step to surface decisions, accept user-supplied subtask requests, and confirm before moving on. Best for novel problems and sign-off gates.
 
 Both modes give the same audit trail — immutable status chain plus proof-of-work reports per step — so a long-running skill execution can be paused, resumed, or replanned mid-flight without losing what was already proven done. `pm-execute` then drains the resulting queue with N parallel workers when steps are independent.
@@ -81,7 +82,7 @@ In short: `hashharness-pm` is a small, storage-first coordination layer for para
 ```
 hashharness-pm/
 ├── skills/
-│   └── pm/                          # Thirteen Claude Code skills + shared scripts
+│   └── pm/                          # Fourteen Claude Code skills + shared scripts
 │       ├── plan/SKILL.md                    # pm-plan        — enqueue a task
 │       ├── next/SKILL.md                    # pm-next        — pull next runnable task
 │       ├── executing/SKILL.md               # pm-executing   — claim a task
@@ -94,6 +95,7 @@ hashharness-pm/
 │       ├── sweep/SKILL.md                   # pm-sweep       — reclaim stale working tasks; race-safe via preempt heartbeat
 │       ├── reclaim/SKILL.md                 # pm-reclaim     — manual force-release of a stuck working claim (with --cascade)
 │       ├── auto-skill-execution/SKILL.md    # pm-auto-skill-execution    — drive another skill end-to-end, no prompts
+│       ├── assisted-skill-execution/SKILL.md # pm-assisted-skill-execution — default-pick + escalate at critical gates
 │       ├── guided-skill-execution/SKILL.md  # pm-guided-skill-execution  — drive another skill with user-in-the-loop gates
 │       ├── skill-shared/extract_steps.py    # SKILL.md step extractor used by auto/guided
 │       ├── scripts/
@@ -161,7 +163,7 @@ Four chains exist per task: status, report, heartbeat, and (for subtasks) `paren
    ```bash
    skills/pm/scripts/pm setup
    ```
-3. **Use the skills** — invoke through Claude Code via `pm-plan`, `pm-next`, `pm-executing`, `pm-report`, `pm-finished` (or `pm-replan`, `pm-cancel`, `pm-execute`, `pm-heartbeat`, `pm-sweep`, `pm-reclaim`, `pm-auto-skill-execution`, `pm-guided-skill-execution`), or call `pm` directly:
+3. **Use the skills** — invoke through Claude Code via `pm-plan`, `pm-next`, `pm-executing`, `pm-report`, `pm-finished` (or `pm-replan`, `pm-cancel`, `pm-execute`, `pm-heartbeat`, `pm-sweep`, `pm-reclaim`, `pm-dashboard`, `pm-auto-skill-execution`, `pm-assisted-skill-execution`, `pm-guided-skill-execution`), or call `pm` directly:
    ```bash
    pm plan --title "Build X" --text "Detailed description..."
    pm next                       # pulls the next runnable task

@@ -13,13 +13,15 @@ description: >
 
 # pm:guided-skill-execution — drive a skill task-by-task with user dialogue
 
-## When to use this vs auto
+## When to use this vs assisted vs auto
 
-| | Guided | Auto (`pm-auto-skill-execution`) |
-|---|---|---|
-| Each step | Pause, present, wait for user input | Pick the documented default, log the choice, continue |
-| New subtasks | Add when the user requests, or when a step's dialogue gate produces a sub-decision | Add only when the skill itself prescribes one |
-| Best for | Novel problems, high-stakes proofs, anything with reconciliation/sign-off gates | Routine runs of well-understood skills |
+| | Guided | Assisted (`pm-assisted-skill-execution`) | Auto (`pm-auto-skill-execution`) |
+|---|---|---|---|
+| Each step | Pause, present, wait for user input | Default-pick routine gates; pause at critical | Pick documented default, log, continue |
+| Critical gate / no default | Pause + ask | **Pause + ask, then continue** | Reject the task |
+| Mandatory step missing precondition | Pause + ask | **Pause + ask: skip / supply / reject** | Reject |
+| New subtasks | Add when the user requests, or when a step's dialogue gate produces a sub-decision | Skill-prescribed OR mid-dialogue user request | Only when the skill itself prescribes one |
+| Best for | Novel problems, high-stakes proofs, anything with reconciliation/sign-off gates | Mostly-routine runs that may need 1–3 user inputs | Routine runs of well-understood skills |
 
 ## Inputs
 

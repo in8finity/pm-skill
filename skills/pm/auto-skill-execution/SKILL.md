@@ -12,13 +12,15 @@ description: >
 
 # pm:auto-skill-execution — drive a skill task-by-task without dialogue
 
-## When to use this vs guided
+## When to use this vs assisted vs guided
 
-| | Auto | Guided (`pm-guided-skill-execution`) |
-|---|---|---|
-| Each step | Pick default, record it, continue | Pause, present, wait for user |
-| New subtasks | Only when the skill itself prescribes them | Whenever the user requests one |
-| Best for | Routine runs, batch processing, well-understood skills | Novel problems, sign-off gates |
+| | Auto | Assisted (`pm-assisted-skill-execution`) | Guided (`pm-guided-skill-execution`) |
+|---|---|---|---|
+| Each step | Pick default, record it, continue | Default-pick at routine gates; pause at critical | Pause, present, wait for user |
+| Critical gate / no default | **Reject the task** | **Pause + ask, then continue** | Pause, present, wait |
+| Mandatory step missing precondition | **Reject** | **Pause + ask: skip / supply / reject** | Pause + ask |
+| New subtasks | Only when the skill itself prescribes them | Skill-prescribed OR mid-dialogue user request | Whenever the user requests one |
+| Best for | Routine runs, batch processing, well-understood skills | Mostly-routine runs that may need 1–3 user inputs | Novel problems, sign-off gates |
 
 The contract: stay **as close to the skill's prescribed flow as possible**.
 Auto means "no dialogue", not "free improvisation". Every deviation from
