@@ -1,6 +1,6 @@
 # hashharness-pm
 
-A planning board for parallel agents — fifteen Claude Code skills + a `pm` CLI dispatcher backed by [hashharness](https://github.com/in8finity/hashharness)'s append-only hash-chained storage.
+A planning board for parallel agents — sixteen Claude Code skills + a `pm` CLI dispatcher backed by [hashharness](https://github.com/in8finity/hashharness)'s append-only hash-chained storage.
 
 The system was designed against a formal model. The model is in this repo. Three structural fixes that landed (claim race-safety, slug uniqueness, and the migration of claim-race resolution to hashharness's native `chain_predecessor` head-move check) were each driven by counterexamples or properties the model produced before the code changed.
 
@@ -82,7 +82,7 @@ In short: `hashharness-pm` is a small, storage-first coordination layer for para
 ```
 hashharness-pm/
 ├── skills/
-│   └── pm/                          # Fifteen Claude Code skills + shared scripts
+│   └── pm/                          # Sixteen Claude Code skills + shared scripts
 │       ├── plan/SKILL.md                    # pm-plan        — enqueue a task
 │       ├── next/SKILL.md                    # pm-next        — pull next runnable task
 │       ├── executing/SKILL.md               # pm-executing   — claim a task
@@ -95,6 +95,7 @@ hashharness-pm/
 │       ├── sweep/SKILL.md                   # pm-sweep       — reclaim stale working tasks; race-safe via preempt heartbeat
 │       ├── reclaim/SKILL.md                 # pm-reclaim     — manual force-release of a stuck working claim (with --cascade)
 │       ├── install/SKILL.md                 # pm-install     — bootstrap the hashharness MCP backend into a venv
+│       ├── extract-steps/SKILL.md           # pm-extract-steps — semantic step extraction with bash validation + nested-skill recursion
 │       ├── auto-skill-execution/SKILL.md    # pm-auto-skill-execution    — drive another skill end-to-end, no prompts
 │       ├── assisted-skill-execution/SKILL.md # pm-assisted-skill-execution — default-pick + escalate at critical gates
 │       ├── guided-skill-execution/SKILL.md  # pm-guided-skill-execution  — drive another skill with user-in-the-loop gates
@@ -183,7 +184,7 @@ Four chains exist per task: status, report, heartbeat, and (for subtasks) `paren
    ```bash
    skills/pm/scripts/pm setup
    ```
-3. **Use the skills** — invoke through Claude Code via `pm-plan`, `pm-next`, `pm-executing`, `pm-report`, `pm-finished` (or `pm-replan`, `pm-cancel`, `pm-execute`, `pm-heartbeat`, `pm-sweep`, `pm-reclaim`, `pm-dashboard`, `pm-install`, `pm-auto-skill-execution`, `pm-assisted-skill-execution`, `pm-guided-skill-execution`), or call `pm` directly:
+3. **Use the skills** — invoke through Claude Code via `pm-plan`, `pm-next`, `pm-executing`, `pm-report`, `pm-finished` (or `pm-replan`, `pm-cancel`, `pm-execute`, `pm-heartbeat`, `pm-sweep`, `pm-reclaim`, `pm-dashboard`, `pm-install`, `pm-extract-steps`, `pm-auto-skill-execution`, `pm-assisted-skill-execution`, `pm-guided-skill-execution`), or call `pm` directly:
    ```bash
    pm plan --title "Build X" --text "Detailed description..."
    pm next                       # pulls the next runnable task
