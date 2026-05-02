@@ -152,7 +152,26 @@ Four chains exist per task: status, report, heartbeat, and (for subtasks) `paren
 
 ## Quick start
 
-1. **Run hashharness in HTTP mode** (separate terminal):
+0. **(First time only)** Install hashharness if it's not on the system. The
+   bundled installer creates an isolated Python venv, generates a launcher,
+   and writes an `env` file you can source:
+   ```bash
+   skills/pm/scripts/pm install --to-home --yes      # → ~/.hashharness/
+   # or: --to-claude         (~/.claude/hashharness/)
+   # or: --to-project        (./.hashharness/ at repo root)
+   # or: --where /custom/path
+   # or: (no flag, interactive) — asks you to pick
+   ```
+   The installer is idempotent — re-running it on an existing install
+   reports the location and exits 0. Use `pm install --check` to test
+   without installing.
+1. **Start the MCP server** — the installer's launcher already wires the
+   right env vars and data dir:
+   ```bash
+   ~/.hashharness/launch.sh &
+   source ~/.hashharness/env                 # exports HASHHARNESS_MCP_URL
+   ```
+   Or run hashharness yourself if you installed it some other way:
    ```bash
    HASHHARNESS_MCP_TRANSPORT=http \
    HASHHARNESS_HTTP_PORT=38417 \

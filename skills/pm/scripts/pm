@@ -19,6 +19,7 @@
 #   pm replan          [-- args for replan.py — restart task + upstream chain]
 #   pm context-id      [-- args for context_id.py — generate sticky-context UUID]
 #   pm dashboard       [-- args for dashboard.py — minimal HTTP dashboard]
+#   pm install         [-- args for install_hashharness.sh — install the MCP backend]
 #
 # Any further args are forwarded verbatim to the underlying script. The
 # scripts themselves use stable Python imports relative to this dir, so
@@ -53,13 +54,14 @@ case "${1:-}" in
   replan)     shift; exec "$DIR/replan.py" "$@" ;;
   context-id) shift; exec "$DIR/context_id.py" "$@" ;;
   dashboard)  shift; exec "$DIR/dashboard.py" "$@" ;;
+  install)    shift; exec "$DIR/install_hashharness.sh" "$@" ;;
   ""|-h|--help)
-    sed -n '2,20p' "$0"
+    sed -n '2,22p' "$0"
     exit 0
     ;;
   *)
     echo "pm: unknown subcommand '$1'" >&2
-    sed -n '2,20p' "$0" >&2
+    sed -n '2,22p' "$0" >&2
     exit 64
     ;;
 esac
