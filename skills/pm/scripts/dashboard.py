@@ -27,8 +27,219 @@ from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlencode, urlparse, parse_qs
 
+import re
+
 import mcp_client
 import store
+
+
+# ---- minimal markdown renderer (stdlib-only) -----------------------------
+# Covers: ATX headings, fenced/indented code blocks, ordered/unordered lists,
+# blockquotes, paragraphs, bold/italic, inline code, links, autolinks.
+# Anything fancier (tables, footnotes, etc.) falls through as plain text.
+
+_MD_INLINE_CODE = re.compile(r"`([^`\n]+)`")
+_MD_BOLD        = re.compile(r"\*\*([^*\n]+)\*\*")
+_MD_ITALIC      = re.compile(r"(?<![*\w])\*([^*\n]+)\*(?!\w)")
+_MD_LINK        = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
+_MD_AUTOLINK    = re.compile(r"(?<![\w(])((?:https?://|mailto:)[^\s<>()]+)")
+
+
+def _md_inline(text: str) -> str:
+    """Inline markdown → HTML. Input is RAW; output is HTML-safe."""
+    placeholders: list[str] = []
+
+    def stash(html: str) -> str:
+        placeholders.append(html)
+        return f"\x00{len(placeholders)-1}\x00"
+
+    # Pull inline code first (its content must not be re-processed).
+    text = _MD_INLINE_CODE.sub(lambda m: stash(f"<code>{escape(m.group(1))}</code>"), text)
+    # Links before autolinks so [text](url) wins.
+    text = _MD_LINK.sub(
+        lambda m: stash(f'<a href="{escape(m.group(2), quote=True)}">{escape(m.group(1))}</a>'),
+        text,
+    )
+    text = _MD_AUTOLINK.sub(
+        lambda m: stash(f'<a href="{escape(m.group(1), quote=True)}">{escape(m.group(1))}</a>'),
+        text,
+    )
+    # Now escape everything else.
+    text = escape(text)
+    text = _MD_BOLD.sub(r"<strong>\1</strong>", text)
+    text = _MD_ITALIC.sub(r"<em>\1</em>", text)
+    # Restore placeholders.
+    text = re.sub(r"\x00(\d+)\x00", lambda m: placeholders[int(m.group(1))], text)
+    return text
+
+
+def render_markdown(text: str) -> str:
+    """Render a small subset of CommonMark to HTML. Safe for untrusted input
+    only insofar as everything not matched is escaped; href values are also
+    escaped, but full XSS hardening (URL scheme allowlist, etc.) is out of
+    scope for this dashboard which serves localhost only."""
+    if not text:
+        return ""
+    lines = text.replace("\r\n", "\n").split("\n")
+    out: list[str] = []
+    i = 0
+    in_list: str | None = None  # 'ul' or 'ol' or None
+    in_quote = False
+
+    def close_list():
+        nonlocal in_list
+        if in_list:
+            out.append(f"</{in_list}>")
+            in_list = None
+
+    def close_quote():
+        nonlocal in_quote
+        if in_quote:
+            out.append("</blockquote>")
+            in_quote = False
+
+    while i < len(lines):
+        line = lines[i]
+
+        # Fenced code block.
+        m = re.match(r"^( {0,3})(`{3,}|~{3,})\s*([\w+-]*)\s*$", line)
+        if m:
+            close_list(); close_quote()
+            fence = m.group(2)
+            lang = m.group(3) or ""
+            i += 1
+            buf = []
+            while i < len(lines) and not re.match(rf"^ {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}\s*$", lines[i]):
+                buf.append(lines[i])
+                i += 1
+            i += 1  # skip closing fence
+            cls = f' class="lang-{escape(lang)}"' if lang else ""
+            out.append(f"<pre><code{cls}>{escape(chr(10).join(buf))}</code></pre>")
+            continue
+
+        # ATX heading.
+        m = re.match(r"^(#{1,6})\s+(.*?)\s*#*\s*$", line)
+        if m:
+            close_list(); close_quote()
+            level = len(m.group(1))
+            out.append(f"<h{level}>{_md_inline(m.group(2))}</h{level}>")
+            i += 1
+            continue
+
+        # Blockquote.
+        m = re.match(r"^>\s?(.*)$", line)
+        if m:
+            close_list()
+            if not in_quote:
+                out.append("<blockquote>")
+                in_quote = True
+            out.append(f"<p>{_md_inline(m.group(1))}</p>")
+            i += 1
+            continue
+
+        # Ordered list.
+        m = re.match(r"^\s*\d+\.\s+(.*)$", line)
+        if m:
+            close_quote()
+            if in_list != "ol":
+                close_list()
+                out.append("<ol>")
+                in_list = "ol"
+            out.append(f"<li>{_md_inline(m.group(1))}</li>")
+            i += 1
+            continue
+
+        # Unordered list.
+        m = re.match(r"^\s*[-*+]\s+(.*)$", line)
+        if m:
+            close_quote()
+            if in_list != "ul":
+                close_list()
+                out.append("<ul>")
+                in_list = "ul"
+            out.append(f"<li>{_md_inline(m.group(1))}</li>")
+            i += 1
+            continue
+
+        # GFM table: header row + separator row + zero-or-more body rows.
+        # Detect by looking ahead — current line has '|', next line is the
+        # separator (cells of dashes with optional :align: markers).
+        if "|" in line and i + 1 < len(lines) and re.match(
+            r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$", lines[i + 1]
+        ):
+            close_list(); close_quote()
+
+            def _cells(row: str) -> list[str]:
+                row = row.strip()
+                if row.startswith("|"): row = row[1:]
+                if row.endswith("|"):   row = row[:-1]
+                return [c.strip() for c in row.split("|")]
+
+            headers = _cells(line)
+            sep_cells = _cells(lines[i + 1])
+            aligns = []
+            for c in sep_cells:
+                left = c.startswith(":")
+                right = c.endswith(":")
+                aligns.append("center" if left and right else "right" if right else "left" if left else "")
+            i += 2
+            body_rows: list[list[str]] = []
+            while i < len(lines) and lines[i].strip() and "|" in lines[i] and not re.match(
+                r"^(#{1,6}\s|>\s|\s*[-*+]\s|\s*\d+\.\s|`{3,}|~{3,})", lines[i]
+            ):
+                body_rows.append(_cells(lines[i]))
+                i += 1
+
+            def _td(tag: str, content: str, align: str) -> str:
+                style = f' style="text-align:{align}"' if align else ''
+                return f"<{tag}{style}>{_md_inline(content)}</{tag}>"
+
+            parts = ["<table><thead><tr>"]
+            for idx, h in enumerate(headers):
+                parts.append(_td("th", h, aligns[idx] if idx < len(aligns) else ""))
+            parts.append("</tr></thead><tbody>")
+            for row in body_rows:
+                parts.append("<tr>")
+                for idx in range(len(headers)):
+                    cell = row[idx] if idx < len(row) else ""
+                    parts.append(_td("td", cell, aligns[idx] if idx < len(aligns) else ""))
+                parts.append("</tr>")
+            parts.append("</tbody></table>")
+            out.append("".join(parts))
+            continue
+
+        # Horizontal rule.
+        if re.match(r"^\s*([-*_])(\s*\1){2,}\s*$", line):
+            close_list(); close_quote()
+            out.append("<hr>")
+            i += 1
+            continue
+
+        # Blank line.
+        if not line.strip():
+            close_list(); close_quote()
+            i += 1
+            continue
+
+        # Paragraph: gather contiguous non-empty, non-special lines.
+        close_list(); close_quote()
+        buf = [line]
+        i += 1
+        while i < len(lines) and lines[i].strip() and not re.match(
+            r"^(#{1,6}\s|>\s|\s*[-*+]\s|\s*\d+\.\s|`{3,}|~{3,})", lines[i]
+        ):
+            # Stop if we're about to enter a table (current line has '|' and
+            # the next is a separator row).
+            if "|" in lines[i] and i + 1 < len(lines) and re.match(
+                r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$", lines[i + 1]
+            ):
+                break
+            buf.append(lines[i])
+            i += 1
+        out.append(f"<p>{_md_inline(' '.join(buf))}</p>")
+
+    close_list(); close_quote()
+    return "\n".join(out)
 
 
 def _unwrap_items(res):
@@ -234,8 +445,28 @@ a:hover {{ text-decoration: underline; }}
 .event-heartbeat {{ border-left-color: #fb8c00; background: #fff8e1; }}
 .event .when {{ color: #777; font-size: 0.8em; font-family: monospace; }}
 .event .kind {{ display: inline-block; min-width: 5em; padding: 0 0.4em; font-size: 0.75em; font-weight: 600; border-radius: 3px; margin-right: 0.5em; background: #eee; color: #444; }}
-.event .body {{ white-space: pre-wrap; font-family: monospace; font-size: 0.85em; color: #333; margin-top: 0.3em; padding: 0.4em 0.6em; background: #fff; border: 1px solid #eee; border-radius: 3px; max-height: 24em; overflow-y: auto; }}
+.event .body {{ font-size: 0.9em; color: #222; margin-top: 0.3em; padding: 0.4em 0.8em; background: #fff; border: 1px solid #eee; border-radius: 3px; max-height: 30em; overflow-y: auto; }}
 .event .body.report-body {{ background: #fff; max-height: none; }}
+.event .body p {{ margin: 0.4em 0; line-height: 1.45; }}
+.event .body h1, .event .body h2, .event .body h3, .event .body h4 {{ margin: 0.6em 0 0.3em; font-weight: 600; color: #222; }}
+.event .body h1 {{ font-size: 1.15em; }}
+.event .body h2 {{ font-size: 1.05em; }}
+.event .body h3 {{ font-size: 0.98em; }}
+.event .body h4 {{ font-size: 0.92em; color: #444; }}
+.event .body ul, .event .body ol {{ margin: 0.3em 0 0.3em 1.4em; padding: 0; }}
+.event .body li {{ margin: 0.15em 0; line-height: 1.4; }}
+.event .body code {{ background: #f3f3f3; padding: 0 0.3em; border-radius: 2px; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 0.88em; }}
+.event .body pre {{ background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 3px; padding: 0.5em 0.8em; overflow-x: auto; margin: 0.4em 0; }}
+.event .body pre code {{ background: transparent; padding: 0; font-size: 0.85em; }}
+.event .body blockquote {{ border-left: 3px solid #ddd; padding: 0.1em 0.8em; color: #555; margin: 0.4em 0; }}
+.event .body a {{ color: #1976d2; }}
+.event .body hr {{ border: 0; border-top: 1px solid #eee; margin: 0.6em 0; }}
+.event .body strong {{ font-weight: 600; }}
+.event .body em {{ font-style: italic; }}
+.event .body table {{ border-collapse: collapse; margin: 0.6em 0; font-size: 0.88em; }}
+.event .body th, .event .body td {{ border: 1px solid #ddd; padding: 0.3em 0.6em; text-align: left; vertical-align: top; }}
+.event .body th {{ background: #f5f5f5; font-weight: 600; }}
+.event .body tr:nth-child(even) td {{ background: #fafafa; }}
 .event .meta {{ color: #555; font-size: 0.85em; margin-top: 0.2em; }}
 .task-header {{ background: #fff; border: 1px solid #ddd; padding: 0.8em 1em; border-radius: 4px; margin-bottom: 0.8em; }}
 .task-header h2 {{ margin: 0 0 0.3em; }}
@@ -459,7 +690,7 @@ def render_task_detail_html(detail: dict, refresh: int) -> str:
     row("created_at", task.get("created_at"))
     row("work_package_id", task.get("work_package_id"))
 
-    body_html = f'<div class="event"><div class="body">{escape(body)}</div></div>' if body else ""
+    body_html = f'<div class="event"><div class="body">{render_markdown(body)}</div></div>' if body else ""
     pieces.append(
         f'<div class="task-header">'
         f'<h2>{escape(slug)} <span class="sha">{escape(short)}</span></h2>'
@@ -499,7 +730,7 @@ def render_task_detail_html(detail: dict, refresh: int) -> str:
                 badges.append(f'<span class="tag">superseded → {escape(ev["superseded_by"][:12])}</span>')
             note_html = ""
             if ev.get("verifier_summary"):
-                note_html += f'<div class="body">{escape(ev["verifier_summary"])}</div>'
+                note_html += f'<div class="body">{render_markdown(ev["verifier_summary"])}</div>'
             if ev.get("cancel_reason"):
                 note_html += f'<div class="meta">reason: {escape(ev["cancel_reason"])}</div>'
             if ev.get("note") and ev["note"] != f'claimed by {ev.get("agent","")}':
@@ -519,7 +750,7 @@ def render_task_detail_html(detail: dict, refresh: int) -> str:
                 f'<div class="event event-report">'
                 f'<span class="kind">report</span>'
                 f'<strong>{escape(title_text)}</strong> <span class="when">{when}</span>'
-                f'<div class="body report-body">{escape(body_text)}</div>'
+                f'<div class="body report-body">{render_markdown(body_text)}</div>'
                 f'</div>'
             )
         elif kind == "heartbeat":
