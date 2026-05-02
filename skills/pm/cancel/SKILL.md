@@ -36,6 +36,34 @@ description: >
 | 0 | Task cancelled (and cascade completed if requested) |
 | 6 | Task already absorbing (`done` / `rejected` / `superseded`); cancellation refused |
 
+## Cascade properties (formally verified)
+
+The `--cascade` walk is `parentTask`-reverse, depth-first, with a
+visited set to break any cycles. Six properties are verified in
+`system-models/planning_cancel_cascade.als`:
+
+- **CC1 NoDescendantLeftUndone** — every undone descendant of the
+  cancelled root ends up `rejected`.
+- **CC2 PreviousTerminalUntouched** — descendants already in `done` or
+  `rejected` are NOT re-closed; they stay where they were.
+- **CC3 CascadeOnlyTransitionsNonTerminal** — the cascade only flips
+  `new`/`working` → `rejected`; never disturbs an already-finished
+  task.
+- **CC4 CascadeIsParentTransitive** — if A is parent of B and B is
+  parent of C, cancelling A reaches C.
+- **CC5 NonDescendantUntouched** — tasks NOT in the parent⁻¹ closure
+  are not touched. Sibling subtrees are isolated.
+- **CC6 CascadeRefusesAbsorbingRoot** — cancel on a root that's
+  already `done`/`rejected`/`superseded` exits 6 without entering the
+  cascade DFS.
+
+**Boundary**: cascade stops at absorbing intermediates. If a
+descendant chain runs A→B(superseded)→C, cancelling A visits B
+(refused per R4), does NOT recurse, and leaves C untouched. In
+practice supersede creates a NEW task; the OLD task's children are
+unusual after supersede. If you need to wipe a chain that includes
+superseded intermediates, cancel each undone subtree explicitly.
+
 ## Why cancellation writes proof
 
 Cancellation is not a silent state flip. The synthetic TaskReport records

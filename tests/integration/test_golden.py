@@ -841,6 +841,97 @@ def g25_replan_skip_on_non_terminal_target() -> None:
               "G25 target must remain working")
 
 
+def g26_cascade_preserves_done_descendants() -> None:
+    """G26: cascade with mixed-state children — one done, one working.
+    The done child must stay done; the working child must become
+    rejected. Closes CC2 PreviousTerminalUntouched + CC3
+    CascadeOnlyTransitionsNonTerminal coverage gaps."""
+    q = fresh_queue("g26")
+    parent = json.loads(pm("plan", "--queue", q, "--title", "P", "--text", "p",
+                           env_extra={"PM_WORKDIR": ""}).stdout
+                        )["task"]["text_sha256"]
+    pm("executing", "--task", parent)
+    # Done child.
+    done_child = json.loads(pm("plan", "--queue", q, "--title", "C-done",
+                               "--text", "d", "--parent", parent,
+                               env_extra={"PM_WORKDIR": ""}).stdout
+                            )["task"]["text_sha256"]
+    pm("executing", "--task", done_child)
+    pm("report", "--task", done_child, "--title", "r", "--text", "ok")
+    pm("finished", "--task", done_child)
+    # Working child.
+    working_child = json.loads(pm("plan", "--queue", q, "--title", "C-work",
+                                  "--text", "w", "--parent", parent,
+                                  env_extra={"PM_WORKDIR": ""}).stdout
+                               )["task"]["text_sha256"]
+    pm("executing", "--task", working_child)
+
+    pm("cancel", "--task", parent, "--cascade", "--reason", "G26")
+
+    assert_eq(store.status_value(store.latest_status(parent)), "rejected",
+              "G26 parent must be rejected")
+    assert_eq(store.status_value(store.latest_status(done_child)), "done",
+              "G26 CC2: done child must STAY done (not re-closed)")
+    assert_eq(store.status_value(store.latest_status(working_child)), "rejected",
+              "G26 working child must be rejected")
+
+
+def g27_cascade_three_deep_transitive() -> None:
+    """G27: a→b→c via parentTask. Cancelling a reaches c. Closes CC4
+    CascadeIsParentTransitive coverage gap (G11 was only 2-deep)."""
+    q = fresh_queue("g27")
+    a = json.loads(pm("plan", "--queue", q, "--title", "A", "--text", "a",
+                      env_extra={"PM_WORKDIR": ""}).stdout
+                   )["task"]["text_sha256"]
+    pm("executing", "--task", a)
+    b = json.loads(pm("plan", "--queue", q, "--title", "B", "--text", "b",
+                      "--parent", a,
+                      env_extra={"PM_WORKDIR": ""}).stdout
+                   )["task"]["text_sha256"]
+    pm("executing", "--task", b)
+    c = json.loads(pm("plan", "--queue", q, "--title", "C", "--text", "c",
+                      "--parent", b,
+                      env_extra={"PM_WORKDIR": ""}).stdout
+                   )["task"]["text_sha256"]
+    pm("executing", "--task", c)
+
+    pm("cancel", "--task", a, "--cascade", "--reason", "G27")
+
+    for t, label in ((a, "a (root)"), (b, "b"), (c, "c (grandchild)")):
+        assert_eq(store.status_value(store.latest_status(t)), "rejected",
+                  f"G27 CC4: {label} must be rejected by transitive cascade")
+
+
+def g28_cascade_isolates_non_descendant_sibling() -> None:
+    """G28: cascade on root + a sibling task with NO parent. Sibling
+    must be untouched. Closes CC5 NonDescendantUntouched coverage gap."""
+    q = fresh_queue("g28")
+    root = json.loads(pm("plan", "--queue", q, "--title", "Root", "--text", "r",
+                         env_extra={"PM_WORKDIR": ""}).stdout
+                      )["task"]["text_sha256"]
+    pm("executing", "--task", root)
+    child = json.loads(pm("plan", "--queue", q, "--title", "Child",
+                          "--text", "c", "--parent", root,
+                          env_extra={"PM_WORKDIR": ""}).stdout
+                       )["task"]["text_sha256"]
+    pm("executing", "--task", child)
+    # Sibling: no parent, in same queue.
+    sibling = json.loads(pm("plan", "--queue", q, "--title", "Sibling",
+                            "--text", "s",
+                            env_extra={"PM_WORKDIR": ""}).stdout
+                         )["task"]["text_sha256"]
+    pm("executing", "--task", sibling)
+
+    pm("cancel", "--task", root, "--cascade", "--reason", "G28")
+
+    assert_eq(store.status_value(store.latest_status(root)), "rejected",
+              "G28 root must be rejected")
+    assert_eq(store.status_value(store.latest_status(child)), "rejected",
+              "G28 child must be rejected")
+    assert_eq(store.status_value(store.latest_status(sibling)), "working",
+              "G28 CC5: non-descendant sibling must remain working")
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -872,6 +963,9 @@ ALL_FLOWS = {
     "G23": g23_cancel_superseded_refused,
     "G24": g24_supersede_clone_inherits_deps_and_carries_replan_of,
     "G25": g25_replan_skip_on_non_terminal_target,
+    "G26": g26_cascade_preserves_done_descendants,
+    "G27": g27_cascade_three_deep_transitive,
+    "G28": g28_cascade_isolates_non_descendant_sibling,
 }
 
 

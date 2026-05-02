@@ -30,6 +30,12 @@ For each verified-aligned property in `planning-reconciliation.md`, this report 
 | **Replan R6** CloneCarriesReplanOf | `supersede_and_clone` writes `replan_of` on the clone's genesis TaskStatus attributes | `pm-replan/SKILL.md` Two-modes (corrected to clarify the link is on `genesis_status.attributes.replan_of`, not on the Task) | `G24` (asserts genesis status's `replan_of` equals original sha) | **Enforced** at all four layers |
 | **Replan R7** CascadeUpResetsTerminalAncestors | `replan.py` walks `find_dependency_ancestors`, resets each terminal one in-place | `pm-replan/SKILL.md` Cascade section | `G7b` (cascade resets done ancestor) | **Enforced** at all four layers |
 | **Replan R8** CascadeUpSkipsNonTerminal | `replan.py` skips ancestors not in `done`/`rejected` | `pm-replan/SKILL.md` Cascade section | `G24` (working ancestor untouched) | **Enforced** at all four layers |
+| **Cancel-cascade CC1** NoDescendantLeftUndone | `cancel.py:cascade()` recursive DFS over `parentTask` reverse-links | `pm-cancel/SKILL.md` "Cascade properties" section, CC1 entry | `G11` (parent + 2 working children all rejected) | **Enforced** at all four layers |
+| **Cancel-cascade CC2** PreviousTerminalUntouched | `store.find_undone_subtasks` filters `{done, rejected}`; `cancel_one` refuses on absorbing | `pm-cancel/SKILL.md` CC2 entry | `G26` (mixed-state cascade — done child stays done) | **Enforced** at all four layers |
+| **Cancel-cascade CC3** CascadeOnlyTransitionsNonTerminal | same filter as CC2 | `pm-cancel/SKILL.md` CC3 entry | `G26` (verifies done child wasn't transitioned) | **Enforced** at all four layers |
+| **Cancel-cascade CC4** CascadeIsParentTransitive | `cascade()` recurses via `out.extend(cascade(child_sha, …))` | `pm-cancel/SKILL.md` CC4 entry | `G27` (3-deep a→b→c, all rejected) | **Enforced** at all four layers |
+| **Cancel-cascade CC5** NonDescendantUntouched | `find_undone_subtasks` parent-link filter scopes the cascade strictly | `pm-cancel/SKILL.md` CC5 entry | `G28` (sibling with no parent stays working) | **Enforced** at all four layers |
+| **Cancel-cascade CC6** CascadeRefusesAbsorbingRoot | `cancel.py main()` returns 6 if `cancel_one` refuses the primary; cascade never enters | `pm-cancel/SKILL.md` CC6 entry + exit-codes table | `G17` (done root refused), `G23` (superseded root refused) | **Enforced** at all four layers |
 | **Heartbeat-vs-reclaim race** (new this session) | `sweep.py` snapshots heartbeat tip; `store.reclaim(preempt_heartbeat=True, …)` writes preempt heartbeat first; `chain_predecessor` on `prevHeartbeat` rejects if a worker raced → `WorkerStillAlive` → sweep aborts. | `pm-sweep/SKILL.md` documents the preempt protocol + the operational caveat (heartbeat interval < TTL). **Imperative.** | `G20` (race lost → worker survives), `G21` (no-race → sweep wins) | **Enforced** at all four layers |
 | **Zombie heartbeat refusal** (new this session) | `heartbeat.py`: `if owner != args.agent: return 12`. **Imperative.** | `pm-heartbeat/SKILL.md` documents exit 12 + the agent-match contract. **Imperative.** | `G22` (A claims → reclaimed → B re-claims → zombie A heartbeat → exit 12) | **Enforced** at all four layers |
 | Schema head race (`set_schema` ordering) | `setup_schema.py` passes `expected_prev` from `get_schema_history`; concurrent set_schema rejected with 'schema head moved'. | (deployment-time, no SKILL.md) | **No test** — `setup_schema.py` is one-shot, rarely concurrent | **Enforced (code)**, **Missing-from-gate (skills + tests)** — acceptable given operational rarity |
@@ -55,13 +61,13 @@ All audited gates have a complete artifact chain.
 ## Per-layer summary
 
 ### Code layer
-**21/21 properties Enforced** with imperative language at the decision point. The replan-enforcement audit surfaced one real bug — `cancel.py` allowed cancellation on `superseded`, violating R4 — fixed in the same change.
+**27/27 properties Enforced** with imperative language at the decision point.
 
 ### Skill texts layer
-**21/21 properties** have explicit gate prose with imperative language at the canonical SKILL.md. R6's prose drift (`pm-replan/SKILL.md` previously said `replan_of` lived on the Task; actually on the genesis TaskStatus) was corrected.
+**27/27 properties** have explicit gate prose with imperative language at the canonical SKILL.md. The cancel-cascade audit added a "Cascade properties (formally verified)" section to `pm-cancel/SKILL.md` enumerating CC1–CC6 + a boundary note on superseded intermediates.
 
 ### Tests layer
-**20/21 properties** have direct test coverage (G2, G3, G3b, G6, G7a/b, G8, G9, G10, G11, G12, G13, G14, G16, G17, G18, G19, G20, G21, G22, G23, G24, G25). One gap remains:
+**26/27 properties** have direct test coverage (G2, G3, G3b, G6, G7a/b, G8, G9, G10, G11, G12, G13, G14, G16–G28). One gap remains:
 
 - **Schema-head race** has no test. `setup_schema.py` is a one-shot deployment op; the absence is acceptable given operational rarity.
 
@@ -73,7 +79,7 @@ All audited gates have a complete artifact chain.
 
 ## Verdict
 
-**21/21 model-verified properties enforced** at the code layer (after the `cancel.py` superseded-refusal fix this session). **21/21 also have imperative skill-text coverage**. Test coverage spans 20/21 properties via **26 golden flows** (the schema-head race remains the one untested-by-design item).
+**27/27 model-verified properties enforced** at the code layer. **27/27 also have imperative skill-text coverage**. Test coverage spans 26/27 properties via **29 golden flows** (the schema-head race remains the one untested-by-design item).
 
 The replan-enforcement audit was where the formal model paid off most directly: the `R4 SupersededIsAbsorbing` property surfaced a real `cancel.py` bug that no integration test had exercised, and the `R6 CloneCarriesReplanOf` property surfaced a documentation drift in `pm-replan/SKILL.md`.
 
