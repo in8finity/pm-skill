@@ -339,6 +339,13 @@ fact AttemptProgress {
 
 // ===== Safety assertions =====
 
+// Holds in this file's transition set (worker loop + cancel). Replan
+// is a separate supervisor operation modeled in planning_replan.als,
+// where `replan_reset[t]` intentionally transitions
+// `Done`/`Rejected → New`. A combined-model trace including replan
+// would NOT satisfy this assertion — that's by design (the whole
+// point of replan). See system-models/reports/alloy-cross-model-
+// soundness.md for the cross-module audit.
 assert TerminalAbsorbing {
   always all t: Task |
     (isDone[t]     => always isDone[t])
