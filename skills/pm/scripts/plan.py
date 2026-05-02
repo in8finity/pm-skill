@@ -85,7 +85,34 @@ def main() -> int:
             return 5
         spawned_at = parent_status["text_sha256"]
 
-    deps = [d for d in args.depends_on.split(",") if d.strip()]
+    deps = [d.strip() for d in args.depends_on.split(",") if d.strip()]
+
+    # Dep validation — see system-models/planning.als plan[] precondition.
+    # The runtime gate that keeps the formal NoCycle property derivable from
+    # the transition system rather than carried as a static input assumption.
+    if deps:
+        own_sha = store.sha256_text(store.task_identity_text(args.queue, slug))
+        if own_sha in deps:
+            sys.stderr.write(
+                f"refusing: dependsOn includes this task's own sha "
+                f"({own_sha[:12]}) — self-loop is unrunnable\n"
+            )
+            return 11
+        for d in deps:
+            target = store.get_task(d)
+            if target is None:
+                sys.stderr.write(
+                    f"refusing: dep {d[:12]} does not resolve to an "
+                    f"existing Task — task would be forever blocked\n"
+                )
+                return 11
+            cur = store.status_value(store.latest_status(d))
+            if cur in ("rejected", "superseded"):
+                sys.stderr.write(
+                    f"refusing: dep {d[:12]} latest status is '{cur}' — "
+                    f"can never become 'done', task would be forever blocked\n"
+                )
+                return 11
 
     # Fetch parent once for both sticky inheritance and workdir resolution.
     parent_task = store.get_task(args.parent) if args.parent else None

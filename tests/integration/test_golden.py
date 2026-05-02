@@ -587,6 +587,39 @@ def g17_cancel_terminal_refused() -> None:
               "G17 task must remain done after refused cancel")
 
 
+def g18_self_loop_dep_refused() -> None:
+    """G18: `pm plan --depends-on <own-prospective-sha>` exits 11 (self-loop
+    is unrunnable; would deadlock the queue). Closes the dep-validation
+    cycle gap formalized as plan[t]'s `t not in t.deps` precondition."""
+    import hashlib
+    q = fresh_queue("g18")
+    slug = "self-loop"
+    own_text = f"task:{q}/{slug}"
+    own_sha = hashlib.sha256(own_text.encode()).hexdigest()
+    p = pm("plan", "--queue", q, "--slug", slug, "--title", "g18",
+           "--text", "self-dep", "--depends-on", own_sha,
+           env_extra={"PM_WORKDIR": ""}, check=False)
+    assert_eq(p.returncode, 11,
+              f"G18 expected exit 11 on self-loop dep; got {p.returncode}")
+    # Task must not have been created.
+    assert store.find_task_by_slug(q, slug) is None, \
+        "G18 task must not exist after self-loop refusal"
+
+
+def g19_nonexistent_dep_refused() -> None:
+    """G19: `pm plan --depends-on <bogus-sha>` exits 11 (forever-blocked
+    deps refused at plan time, not silently created)."""
+    q = fresh_queue("g19")
+    bogus = "0" * 64
+    p = pm("plan", "--queue", q, "--slug", "bogus-dep", "--title", "g19",
+           "--text", "depends on nothing", "--depends-on", bogus,
+           env_extra={"PM_WORKDIR": ""}, check=False)
+    assert_eq(p.returncode, 11,
+              f"G19 expected exit 11 on non-existent dep; got {p.returncode}")
+    assert store.find_task_by_slug(q, "bogus-dep") is None, \
+        "G19 task must not exist after bad-dep refusal"
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -610,6 +643,8 @@ ALL_FLOWS = {
     "G15": g15_spawned_at_links_current_status,
     "G16": g16_finished_without_report,
     "G17": g17_cancel_terminal_refused,
+    "G18": g18_self_loop_dep_refused,
+    "G19": g19_nonexistent_dep_refused,
 }
 
 

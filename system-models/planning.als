@@ -61,6 +61,10 @@ sig RequiresVerifier in Task {}
 // binding (the model collapses Agent and Context — same atom).
 sig Sticky in Task {}
 
+// NoCycle: derived from `plan[t]`'s `t not in t.deps` precondition plus
+// Task immutability (deps locked at creation; no transition mutates them).
+// Self-loops are refused at plan time (plan.py exit 11) and longer cycles
+// are unreachable because no later transition can add an edge into a Task.
 fact NoCycle    { no t: Task | t in t.^deps }
 fact NoSelfDep  { all t: Task | t not in t.deps }
 fact NoSelfParent { all t: Task | t.parent != t }
@@ -139,6 +143,7 @@ pred frameAllTasks {
 pred plan[t: Task] {
   // Preconditions
   t not in Pending
+  t not in t.deps                            // self-loop refused (plan.py exit 11)
   all d: t.deps | d in Pending
   // Parent (if any) must be on the board too
   no t.parent or t.parent in Pending
