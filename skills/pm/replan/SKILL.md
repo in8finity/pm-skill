@@ -23,11 +23,14 @@ description: >
   pulls the queue will see the task as `new` and pick it up again.
 - **Body adjustment** (`--text` and/or `--verifier` given): creates a
   NEW Task in the same queue with the adjusted body. The new task gets
-  slug `<original-slug>-r<N>` (next free), inherits the original's
-  parent / spawnedAt / dependsOn / sticky / workdir, and links back via
-  `attributes.replan_of = <original-sha>`. The original task is
-  appended `TaskStatus(superseded, superseded_by=<new-sha>)` — a new
-  terminal status that excludes it from `pm next` forever.
+  slug `<original-slug>-r<N>` (next free) and inherits the original's
+  parent / spawnedAt / dependsOn / sticky / workdir. The audit link
+  back to the original is on the new task's **genesis TaskStatus**
+  (not on the Task itself): `genesis_status.attributes.replan_of =
+  <original-sha>`. The original task is appended
+  `TaskStatus(superseded, superseded_by=<new-sha>)` — an absorbing
+  status that excludes it from `pm next` forever and is also refused
+  by `pm cancel` (see `pm-cancel/SKILL.md`).
 
 ## Cascade behavior
 

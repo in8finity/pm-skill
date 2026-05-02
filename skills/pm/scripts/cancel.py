@@ -17,7 +17,7 @@ Usage:
 
 Exit codes:
   0 cancelled (and any cascade)
-  6 task already terminal — refuse (terminal-absorbing)
+  6 task already absorbing (done / rejected / superseded) — refuse
 """
 from __future__ import annotations
 
@@ -36,9 +36,15 @@ def default_canceller() -> str:
 
 def cancel_one(task_sha: str, *, reason: str, cancelled_by: str) -> dict | None:
     cur = store.status_value(store.latest_status(task_sha))
-    if cur in ("done", "rejected"):
+    # Refuse on any absorbing status: done/rejected (terminal-absorbing
+    # per planning.als) and superseded (absorbing per planning_replan.als
+    # R4 SupersededIsAbsorbing — cancelling on top of a superseded task
+    # would falsify the absorption property and pollute the audit chain
+    # with a redundant `rejected` after the new clone has already
+    # replaced it; cancel the successor instead).
+    if cur in ("done", "rejected", "superseded"):
         sys.stderr.write(
-            f"refusing: task {task_sha[:12]} status is '{cur}' (terminal-absorbing)\n"
+            f"refusing: task {task_sha[:12]} status is '{cur}' (absorbing)\n"
         )
         return None
     return store.cancel_task(task_sha, reason=reason, cancelled_by=cancelled_by)

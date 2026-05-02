@@ -22,6 +22,14 @@ For each verified-aligned property in `planning-reconciliation.md`, this report 
 | `StickyChainCoherence` / `StickyBindingOnlyAtClaim` | `store.check_sticky_eligibility` invoked from `executing.py`/`heartbeat.py`/`report.py`/`finished.py`; refusal exit 10. | `pm-executing/SKILL.md` documents sticky path; broader semantics in `store.py` docstrings | `G8` exhaustively covers claim binds context, wrong-context report/finished → exit 10, right-context succeeds | **Enforced** at all four layers |
 | `CancelledIsRejectedTerminal` / `CancelOnlyOnNonTerminal` / `CancelledHasProof` | `cancel.py` refuses on terminal; `store.cancel_task` synthesizes report + rejected status via `append_status` (so closing status passes through chain_predecessor). | `pm-cancel/SKILL.md` documents `--cascade` and synthetic-report-as-proof | `G11` (cascade success), `G17` (refusal of cancel-on-done) | **Enforced** at all four layers |
 | Reclaim safety: dead worker is recoverable | `sweep.py` reclaims past TTL; `store.reclaim` appends `new` with `reclaimed=true`. | `pm-cancel/SKILL.md` mentions reclaim/sweep; sweep doc inline | `G13` (sweep --ttl 1 reclaims dormant claim), `G12` (cascade reclaim sticky) | **Enforced** at all four layers |
+| **Replan R1** ReplanRefusedOnSuperseded | `replan.py` exit 6 on superseded target | `pm-replan/SKILL.md` exit-codes table | `G24` (replan after supersede → exit 6) | **Enforced** at all four layers |
+| **Replan R2** ResetOnlyOnTerminal | `reset_in_place` skips (not refuses) when target is `new`/`working`; output records `skipped=true` | `pm-replan/SKILL.md` cascade section ("Ancestors already in `new` or `working` are left alone") + Two-modes section | `G25` (replan of `new` and `working` target — both skip cleanly) | **Enforced** at all four layers |
+| **Replan R3** ResetSetsNew | `reset_in_place` appends `TaskStatus(new, replanned=true)` | `pm-replan/SKILL.md` Two-modes | `G7a` (replan rejected → `new`) | **Enforced** at all four layers |
+| **Replan R4** SupersededIsAbsorbing | `cancel.py` refuses on `superseded` (post-fix); `finished.py`/`executing.py`/`replan.py` already refused on superseded | `pm-cancel/SKILL.md` "Why superseded is absorbing too" + `pm-replan/SKILL.md` exit-codes | `G23` (cancel of superseded → exit 6) | **Enforced** at all four layers (after the bug fix landed alongside this audit) |
+| **Replan R5** CloneInheritsDeps | `supersede_and_clone` passes `depends_on=deps` to `create_task` | `pm-replan/SKILL.md` Two-modes ("inherits the original's parent / spawnedAt / dependsOn / sticky / workdir") | `G24` (asserts `dependsOn` of clone equals original's) | **Enforced** at all four layers |
+| **Replan R6** CloneCarriesReplanOf | `supersede_and_clone` writes `replan_of` on the clone's genesis TaskStatus attributes | `pm-replan/SKILL.md` Two-modes (corrected to clarify the link is on `genesis_status.attributes.replan_of`, not on the Task) | `G24` (asserts genesis status's `replan_of` equals original sha) | **Enforced** at all four layers |
+| **Replan R7** CascadeUpResetsTerminalAncestors | `replan.py` walks `find_dependency_ancestors`, resets each terminal one in-place | `pm-replan/SKILL.md` Cascade section | `G7b` (cascade resets done ancestor) | **Enforced** at all four layers |
+| **Replan R8** CascadeUpSkipsNonTerminal | `replan.py` skips ancestors not in `done`/`rejected` | `pm-replan/SKILL.md` Cascade section | `G24` (working ancestor untouched) | **Enforced** at all four layers |
 | **Heartbeat-vs-reclaim race** (new this session) | `sweep.py` snapshots heartbeat tip; `store.reclaim(preempt_heartbeat=True, …)` writes preempt heartbeat first; `chain_predecessor` on `prevHeartbeat` rejects if a worker raced → `WorkerStillAlive` → sweep aborts. | `pm-sweep/SKILL.md` documents the preempt protocol + the operational caveat (heartbeat interval < TTL). **Imperative.** | `G20` (race lost → worker survives), `G21` (no-race → sweep wins) | **Enforced** at all four layers |
 | **Zombie heartbeat refusal** (new this session) | `heartbeat.py`: `if owner != args.agent: return 12`. **Imperative.** | `pm-heartbeat/SKILL.md` documents exit 12 + the agent-match contract. **Imperative.** | `G22` (A claims → reclaimed → B re-claims → zombie A heartbeat → exit 12) | **Enforced** at all four layers |
 | Schema head race (`set_schema` ordering) | `setup_schema.py` passes `expected_prev` from `get_schema_history`; concurrent set_schema rejected with 'schema head moved'. | (deployment-time, no SKILL.md) | **No test** — `setup_schema.py` is one-shot, rarely concurrent | **Enforced (code)**, **Missing-from-gate (skills + tests)** — acceptable given operational rarity |
@@ -47,13 +55,13 @@ All audited gates have a complete artifact chain.
 ## Per-layer summary
 
 ### Code layer
-**13/13 properties Enforced** with imperative language at the decision point. Two new gates added this session — preempt-heartbeat (claim race protection across types) and heartbeat owner-check (zombie refusal) — each landed with a structurally faithful implementation.
+**21/21 properties Enforced** with imperative language at the decision point. The replan-enforcement audit surfaced one real bug — `cancel.py` allowed cancellation on `superseded`, violating R4 — fixed in the same change.
 
 ### Skill texts layer
-**13/13 properties** have explicit gate prose with imperative language at the canonical SKILL.md. The previous two gaps (heartbeat-vs-reclaim race, zombie heartbeat refusal) were closed by adding `pm-sweep/SKILL.md` and `pm-heartbeat/SKILL.md`.
+**21/21 properties** have explicit gate prose with imperative language at the canonical SKILL.md. R6's prose drift (`pm-replan/SKILL.md` previously said `replan_of` lived on the Task; actually on the genesis TaskStatus) was corrected.
 
 ### Tests layer
-**12/13 properties** have direct test coverage (G2, G3, G3b, G6, G8, G9, G10, G11, G12, G13, G14, G16, G17, G18, G19, G20, G21, G22). One gap:
+**20/21 properties** have direct test coverage (G2, G3, G3b, G6, G7a/b, G8, G9, G10, G11, G12, G13, G14, G16, G17, G18, G19, G20, G21, G22, G23, G24, G25). One gap remains:
 
 - **Schema-head race** has no test. `setup_schema.py` is a one-shot deployment op; the absence is acceptable given operational rarity.
 
@@ -65,7 +73,9 @@ All audited gates have a complete artifact chain.
 
 ## Verdict
 
-**13/13 model-verified properties remain enforced** at the code layer with structural or imperative gates. **13/13 also have imperative skill-text coverage** after the addition of `pm-sweep/SKILL.md` and `pm-heartbeat/SKILL.md`. Test coverage spans 12/13 properties via 23 golden flows (the schema-head race remains the one untested-by-design item).
+**21/21 model-verified properties enforced** at the code layer (after the `cancel.py` superseded-refusal fix this session). **21/21 also have imperative skill-text coverage**. Test coverage spans 20/21 properties via **26 golden flows** (the schema-head race remains the one untested-by-design item).
+
+The replan-enforcement audit was where the formal model paid off most directly: the `R4 SupersededIsAbsorbing` property surfaced a real `cancel.py` bug that no integration test had exercised, and the `R6 CloneCarriesReplanOf` property surfaced a documentation drift in `pm-replan/SKILL.md`.
 
 The two new safety holes addressed this session — heartbeat-vs-reclaim race and zombie-heartbeat refusal — landed with paired model properties (`LiveHeartbeatBlocksReclaim`, `ReclaimRequiresStableHeartbeatChain`), structural code gates (chain_predecessor on `prevHeartbeat`, agent-match check), and direct integration tests (G20, G21, G22). The cycle/dep validation closure (G18, G19) similarly landed end-to-end.
 

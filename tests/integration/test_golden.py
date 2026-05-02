@@ -733,6 +733,114 @@ def g19_nonexistent_dep_refused() -> None:
         "G19 task must not exist after bad-dep refusal"
 
 
+def g23_cancel_superseded_refused() -> None:
+    """G23: supersede a task via replan, then try to cancel the original
+    → exit 6 (superseded is absorbing). Closes R4 SupersededIsAbsorbing
+    runtime gap previously violated by cancel.py."""
+    q = fresh_queue("g23")
+    sha = json.loads(pm("plan", "--queue", q, "--title", "g23",
+                        "--text", "to be superseded",
+                        env_extra={"PM_WORKDIR": ""}).stdout
+                     )["task"]["text_sha256"]
+    pm("executing", "--task", sha)
+    pm("report", "--task", sha, "--title", "r", "--text", "x")
+    pm("finished", "--task", sha, "--rejected")
+    # Replan with edits → original becomes superseded.
+    pm("replan", "--task", sha, "--text", "v2", "--no-cascade-up")
+    assert_eq(store.status_value(store.latest_status(sha)), "superseded",
+              "G23 setup: original must be superseded")
+
+    p = pm("cancel", "--task", sha,
+           "--reason", "G23 should refuse", check=False)
+    assert_eq(p.returncode, 6,
+              f"G23 expected exit 6 cancelling superseded; got {p.returncode}")
+    assert_eq(store.status_value(store.latest_status(sha)), "superseded",
+              "G23 superseded task must remain superseded")
+
+
+def g24_supersede_clone_inherits_deps_and_carries_replan_of() -> None:
+    """G24: bundle of replan-clone properties — R1 (replan refused on
+    superseded), R5 (clone inherits dep set), R6 (clone's genesis
+    TaskStatus carries replan_of), R8 (cascade-up skips working
+    ancestor)."""
+    q = fresh_queue("g24")
+    # A is a dep that we'll leave in `working` (so cascade should skip it).
+    a = json.loads(pm("plan", "--queue", q, "--title", "A", "--text", "dep A",
+                      env_extra={"PM_WORKDIR": ""}).stdout
+                   )["task"]["text_sha256"]
+    pm("executing", "--task", a)  # A → working
+    # B depends on A, will be replan-cloned.
+    b = json.loads(pm("plan", "--queue", q, "--title", "B", "--text", "B v1",
+                      "--depends-on", a,
+                      env_extra={"PM_WORKDIR": ""}).stdout
+                   )["task"]["text_sha256"]
+    # B can't be claimed (A is working, not done), so B is still `new`.
+    # Drive B's lifecycle to terminal so we can replan it: skip — actually
+    # replan refuses if B is `new`/`working` (R2 skip-not-refuse for
+    # reset_in_place; for supersede_and_clone the gate is just "not
+    # superseded"). For supersede+clone, B can be in any non-superseded
+    # state. Run replan with edits → supersede+clone path.
+    out = json.loads(pm("replan", "--task", b, "--text", "B v2").stdout)
+    new_b = out["target_result"]["new_task"]
+    assert_eq(out["target_result"]["mode"], "supersede_and_clone",
+              "G24 mode must be supersede_and_clone (--text given)")
+
+    # R5: clone inherits dep set.
+    new_b_obj = store.get_task(new_b)
+    new_deps_records = (new_b_obj.get("links") or {}).get("dependsOn") or []
+    a_record_sha = store.get_task(a)["record_sha256"]
+    assert_eq(new_deps_records, [a_record_sha],
+              "G24 R5: clone's dependsOn must equal original's (A only)")
+
+    # R6: clone's genesis TaskStatus carries replan_of = original.
+    genesis = store.latest_status(new_b)
+    replan_of = (genesis.get("attributes") or {}).get("replan_of")
+    assert_eq(replan_of, b,
+              "G24 R6: clone's genesis status must carry replan_of=original")
+
+    # R8: cascade-up skipped A (it was `working`, not terminal). Confirm
+    # A is still working — replan didn't touch it.
+    assert_eq(store.status_value(store.latest_status(a)), "working",
+              "G24 R8: working ancestor must be untouched by cascade-up")
+
+    # R1: trying to replan the now-superseded original → exit 6.
+    p = pm("replan", "--task", b, check=False)
+    assert_eq(p.returncode, 6,
+              f"G24 R1: replan on superseded must exit 6; got {p.returncode}")
+
+
+def g25_replan_skip_on_non_terminal_target() -> None:
+    """G25: in-place replan of a task in `new` or `working` is a no-op
+    (skip), not a refusal. The output records `skipped: true` and the
+    target's status is unchanged. Closes R2 ResetOnlyOnTerminal coverage
+    gap (skip semantics specifically — refusal on superseded is G23)."""
+    q = fresh_queue("g25")
+    sha = json.loads(pm("plan", "--queue", q, "--title", "g25",
+                        "--text", "skip me",
+                        env_extra={"PM_WORKDIR": ""}).stdout
+                     )["task"]["text_sha256"]
+    # Task is `new`. In-place replan should skip.
+    out = json.loads(pm("replan", "--task", sha, "--no-cascade-up").stdout)
+    target_result = out["target_result"]
+    assert target_result.get("skipped") is True, \
+        f"G25 expected skipped=True for replan of `new` target; got {target_result}"
+    assert_eq(target_result.get("current"), "new",
+              "G25 skipped result must record current status")
+    assert_eq(store.status_value(store.latest_status(sha)), "new",
+              "G25 target must remain new (no append, no transition)")
+
+    # Now claim it → working. Replan again — also skips.
+    pm("executing", "--task", sha)
+    out2 = json.loads(pm("replan", "--task", sha, "--no-cascade-up").stdout)
+    target_result2 = out2["target_result"]
+    assert target_result2.get("skipped") is True, \
+        f"G25 expected skipped=True for replan of `working` target; got {target_result2}"
+    assert_eq(target_result2.get("current"), "working",
+              "G25 skipped result must record working status")
+    assert_eq(store.status_value(store.latest_status(sha)), "working",
+              "G25 target must remain working")
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -761,6 +869,9 @@ ALL_FLOWS = {
     "G20": g20_heartbeat_wins_reclaim_race,
     "G21": g21_sweep_wins_with_no_concurrent_heartbeat,
     "G22": g22_zombie_heartbeat_after_reclaim_refused,
+    "G23": g23_cancel_superseded_refused,
+    "G24": g24_supersede_clone_inherits_deps_and_carries_replan_of,
+    "G25": g25_replan_skip_on_non_terminal_target,
 }
 
 

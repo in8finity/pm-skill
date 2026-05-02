@@ -15,7 +15,8 @@ description: >
 `../scripts/pm cancel --task <task-sha> [--reason "..."] [--cancelled-by ID] [--cascade]`
 
 - Reads the latest TaskStatus for `<task-sha>`. Refuses with exit code 6
-  if the task is already `done` or `rejected` (terminal-absorbing).
+  if the task's current status is `done`, `rejected`, or `superseded`
+  (any absorbing status — see "Why superseded is absorbing too" below).
 - Appends a synthetic TaskReport containing the cancel reason.
 - Appends a TaskStatus with:
   - `attributes.status = "rejected"`
@@ -33,7 +34,7 @@ description: >
 | Code | Meaning |
 |------|---------|
 | 0 | Task cancelled (and cascade completed if requested) |
-| 6 | Task already terminal; cancellation refused |
+| 6 | Task already absorbing (`done` / `rejected` / `superseded`); cancellation refused |
 
 ## Why cancellation writes proof
 
@@ -46,3 +47,14 @@ every terminal status carries evidence.
 
 Unlike `pm:finished`, cancellation does **not** require the current
 worker to be the closer. It is a supervisor/planner override by design.
+
+## Why superseded is absorbing too
+
+`pm replan --text/--verifier` marks the original task `superseded` and
+creates a new clone. From the audit chain's perspective, the original
+is already closed — its successor carries the work forward. Allowing
+`pm cancel` to then append `rejected` on top would falsify the
+`SupersededIsAbsorbing` property (verified in
+`system-models/planning_replan.als`) and pollute the chain with a
+misleading second close. If you want to stop the chain, cancel the
+SUCCESSOR (the `-r<N>` clone) instead.
