@@ -8,9 +8,11 @@ Usage:
   pm dashboard [--port 38418] [--bind 127.0.0.1] [--refresh 5]
 
 Endpoints:
-  /              HTML dashboard (auto-refresh)
-  /api/state     JSON snapshot (workdirs → queues → task tree + status)
-  /healthz       liveness probe ("ok")
+  /                   HTML dashboard (auto-refresh; supports filters via query params)
+  /task/<sha>         HTML detail view for one task — full status / report / heartbeat history
+  /api/state          JSON snapshot (workdirs → queues → task tree + status)
+  /api/task/<sha>     JSON detail for one task (chains, body, attributes)
+  /healthz            liveness probe ("ok")
 
 Exit:
   Ctrl+C
@@ -100,6 +102,85 @@ def fetch_state() -> dict:
     }
 
 
+def _chain_history(task_sha: str, type_name: str) -> list[dict]:
+    """Return all items of `type_name` for this task, oldest first.
+
+    The chain is enforced by `chain_predecessor` so created_at order
+    equals chain order. Walking the prevX link explicitly would be
+    rigorous but adds a round-trip per item; for a dashboard, sorted
+    works fine and is dramatically cheaper for long chains.
+    """
+    res = mcp_client.tool("get_work_package", {
+        "work_package_id": store.task_wp(task_sha),
+        "type": type_name,
+    })
+    items = _unwrap_items(res)
+    items.sort(key=lambda it: it.get("created_at") or "")
+    return items
+
+
+def fetch_task_detail(task_sha: str) -> dict | None:
+    """Return everything needed to render a per-task view: the Task itself,
+    and its three chains (status, report, heartbeat) in chronological order.
+    """
+    task = store.get_task(task_sha)
+    if task is None:
+        return None
+    statuses    = _chain_history(task_sha, "TaskStatus")
+    reports     = _chain_history(task_sha, "TaskReport")
+    heartbeats  = _chain_history(task_sha, "TaskHeartbeat")
+
+    # Build a unified timeline interleaving status/report/heartbeat events.
+    events = []
+    for s in statuses:
+        attrs = s.get("attributes") or {}
+        events.append({
+            "kind": "status",
+            "created_at": s.get("created_at") or "",
+            "key": attrs.get("status") or "?",
+            "agent": attrs.get("agent") or "",
+            "context_id": attrs.get("context_id") or "",
+            "verifier": attrs.get("verifier") or "",
+            "verifier_exit": attrs.get("verifier_exit"),
+            "verifier_summary": attrs.get("verifier_summary") or "",
+            "reclaimed": attrs.get("reclaimed") or False,
+            "reclaimer": attrs.get("reclaimer") or "",
+            "cancelled": attrs.get("cancelled") or False,
+            "cancelled_by": attrs.get("cancelled_by") or "",
+            "cancel_reason": attrs.get("cancel_reason") or "",
+            "replanned": attrs.get("replanned") or False,
+            "superseded_by": attrs.get("superseded_by") or "",
+            "text_sha256": s.get("text_sha256") or "",
+            "note": (s.get("text") or "").split("\n#nonce:")[0],
+        })
+    for r in reports:
+        events.append({
+            "kind": "report",
+            "created_at": r.get("created_at") or "",
+            "title": r.get("title") or "",
+            "body": (r.get("text") or "").split("\n#nonce:")[0],
+            "text_sha256": r.get("text_sha256") or "",
+        })
+    for h in heartbeats:
+        attrs = h.get("attributes") or {}
+        events.append({
+            "kind": "heartbeat",
+            "created_at": h.get("created_at") or "",
+            "agent": attrs.get("agent") or "",
+            "preempt": attrs.get("preempt") or False,
+            "text_sha256": h.get("text_sha256") or "",
+        })
+    events.sort(key=lambda e: e["created_at"])
+
+    return {
+        "task": task,
+        "statuses": statuses,
+        "reports": reports,
+        "heartbeats": heartbeats,
+        "events": events,
+    }
+
+
 HTML_HEAD = """<!DOCTYPE html>
 <html><head>
 <meta charset="utf-8">
@@ -146,6 +227,21 @@ h3 {{ font-size: 1em; margin: 0.4em 0 0.3em; color: #555; }}
 .foot {{ margin-top: 1.5em; color: #999; font-size: 0.8em; }}
 a {{ color: #1976d2; text-decoration: none; }}
 a:hover {{ text-decoration: underline; }}
+.timeline {{ background: #fff; border: 1px solid #ddd; border-radius: 4px; padding: 0.4em 0.8em; }}
+.event {{ padding: 0.5em 0.6em; border-left: 4px solid #ccc; margin: 0.4em 0; background: #fafafa; border-radius: 0 3px 3px 0; }}
+.event-status    {{ border-left-color: #1976d2; }}
+.event-report    {{ border-left-color: #388e3c; background: #f1f8e9; }}
+.event-heartbeat {{ border-left-color: #fb8c00; background: #fff8e1; }}
+.event .when {{ color: #777; font-size: 0.8em; font-family: monospace; }}
+.event .kind {{ display: inline-block; min-width: 5em; padding: 0 0.4em; font-size: 0.75em; font-weight: 600; border-radius: 3px; margin-right: 0.5em; background: #eee; color: #444; }}
+.event .body {{ white-space: pre-wrap; font-family: monospace; font-size: 0.85em; color: #333; margin-top: 0.3em; padding: 0.4em 0.6em; background: #fff; border: 1px solid #eee; border-radius: 3px; max-height: 24em; overflow-y: auto; }}
+.event .body.report-body {{ background: #fff; max-height: none; }}
+.event .meta {{ color: #555; font-size: 0.85em; margin-top: 0.2em; }}
+.task-header {{ background: #fff; border: 1px solid #ddd; padding: 0.8em 1em; border-radius: 4px; margin-bottom: 0.8em; }}
+.task-header h2 {{ margin: 0 0 0.3em; }}
+.task-header dl {{ display: grid; grid-template-columns: max-content 1fr; gap: 0.2em 0.8em; margin: 0.4em 0 0; font-size: 0.88em; }}
+.task-header dt {{ color: #666; }}
+.task-header dd {{ margin: 0; font-family: monospace; word-break: break-all; }}
 </style>
 </head><body>
 <h1>pm dashboard <span class="sha">— auto-refresh {refresh}s · <a href="/api/state">json</a></span></h1>
@@ -168,11 +264,12 @@ def _render_task(task: dict, children_of: dict, depth: int = 0) -> list[str]:
 
     title_part = f'<span class="title">— {escape(task["title"])[:80]}</span>' if task["title"] else ""
 
+    detail_url = f'/task/{escape(task["sha"])}'
     out.append(
         f'<div class="task" data-depth="{depth}">'
         f'<span class="status status-{escape(task["status"])}">{escape(task["status"])}</span>'
-        f'<span class="slug">{escape(task["slug"])}</span> '
-        f'<span class="sha">{escape(task["short_sha"])}</span>'
+        f'<a class="slug" href="{detail_url}">{escape(task["slug"])}</a> '
+        f'<a class="sha" href="{detail_url}">{escape(task["short_sha"])}</a>'
         f'{title_part}'
         f'{"".join(tags)}'
         f'</div>'
@@ -334,6 +431,114 @@ def render_html(state: dict, refresh: int, filters: dict | None = None,
     return "\n".join(pieces)
 
 
+def render_task_detail_html(detail: dict, refresh: int) -> str:
+    """Render the per-task detail page: header + chronological event timeline."""
+    task = detail["task"]
+    attrs = task.get("attributes") or {}
+    sha = task.get("text_sha256") or ""
+    short = sha[:12]
+    slug = attrs.get("slug") or "?"
+    title = task.get("title") or ""
+    body = (task.get("text") or "").split("\n#nonce:")[0]
+
+    pieces = [HTML_HEAD.format(refresh=refresh)]
+    pieces.append(f'<p><a href="/">← back to dashboard</a></p>')
+
+    # Header.
+    rows = []
+    def row(k, v):
+        if v is None or v == "":
+            return
+        rows.append(f'<dt>{escape(str(k))}</dt><dd>{escape(str(v))}</dd>')
+    row("sha", sha)
+    row("slug", slug)
+    row("queue", attrs.get("queue"))
+    row("workdir", attrs.get("workdir"))
+    row("verifier", attrs.get("verifier"))
+    row("sticky", attrs.get("sticky"))
+    row("created_at", task.get("created_at"))
+    row("work_package_id", task.get("work_package_id"))
+
+    body_html = f'<div class="event"><div class="body">{escape(body)}</div></div>' if body else ""
+    pieces.append(
+        f'<div class="task-header">'
+        f'<h2>{escape(slug)} <span class="sha">{escape(short)}</span></h2>'
+        + (f'<div>{escape(title)}</div>' if title else '')
+        + f'<dl>{"".join(rows)}</dl>'
+        + body_html
+        + '</div>'
+    )
+
+    # Event timeline.
+    pieces.append(f'<h2>Timeline ({len(detail["events"])} events)</h2>')
+    pieces.append('<div class="timeline">')
+    if not detail["events"]:
+        pieces.append('<p class="empty">(no events yet)</p>')
+    for ev in detail["events"]:
+        kind = ev["kind"]
+        when = escape(ev.get("created_at") or "")
+        if kind == "status":
+            status = ev["key"]
+            badges = []
+            if ev.get("agent"):
+                badges.append(f'<span class="tag tag-owner">@{escape(ev["agent"])[:32]}</span>')
+            if ev.get("context_id"):
+                badges.append(f'<span class="tag tag-ctx">ctx:{escape(ev["context_id"][:8])}</span>')
+            if ev.get("verifier"):
+                vtxt = f'verifier:{escape(ev["verifier"])[:30]}'
+                if ev.get("verifier_exit") is not None:
+                    vtxt += f' exit={ev["verifier_exit"]}'
+                badges.append(f'<span class="tag tag-verifier">{vtxt}</span>')
+            if ev.get("reclaimed"):
+                badges.append(f'<span class="tag" style="background:#ffe0b2;color:#bf360c">reclaimed by {escape(ev.get("reclaimer") or "")}</span>')
+            if ev.get("cancelled"):
+                badges.append(f'<span class="tag" style="background:#ffcdd2;color:#b71c1c">cancelled by {escape(ev.get("cancelled_by") or "")}</span>')
+            if ev.get("replanned"):
+                badges.append(f'<span class="tag" style="background:#e1bee7;color:#4a148c">replanned</span>')
+            if ev.get("superseded_by"):
+                badges.append(f'<span class="tag">superseded → {escape(ev["superseded_by"][:12])}</span>')
+            note_html = ""
+            if ev.get("verifier_summary"):
+                note_html += f'<div class="body">{escape(ev["verifier_summary"])}</div>'
+            if ev.get("cancel_reason"):
+                note_html += f'<div class="meta">reason: {escape(ev["cancel_reason"])}</div>'
+            if ev.get("note") and ev["note"] != f'claimed by {ev.get("agent","")}':
+                note_html += f'<div class="meta">{escape(ev["note"])}</div>'
+            pieces.append(
+                f'<div class="event event-status">'
+                f'<span class="kind">status</span>'
+                f'<span class="status status-{escape(status)}">{escape(status)}</span>'
+                f' {"".join(badges)} <span class="when">{when}</span>'
+                f'{note_html}'
+                f'</div>'
+            )
+        elif kind == "report":
+            body_text = ev.get("body") or ""
+            title_text = ev.get("title") or ""
+            pieces.append(
+                f'<div class="event event-report">'
+                f'<span class="kind">report</span>'
+                f'<strong>{escape(title_text)}</strong> <span class="when">{when}</span>'
+                f'<div class="body report-body">{escape(body_text)}</div>'
+                f'</div>'
+            )
+        elif kind == "heartbeat":
+            preempt = ' <span class="tag" style="background:#ffe0b2;color:#bf360c">preempt</span>' if ev.get("preempt") else ''
+            agent = escape(ev.get("agent") or "")
+            pieces.append(
+                f'<div class="event event-heartbeat">'
+                f'<span class="kind">heartbeat</span>'
+                f'<span class="tag tag-owner">@{agent[:32]}</span>{preempt}'
+                f' <span class="when">{when}</span>'
+                f'</div>'
+            )
+    pieces.append('</div>')
+
+    pieces.append(f'<div class="foot">JSON: <a href="/api/task/{escape(sha)}">/api/task/{escape(short)}</a></div>')
+    pieces.append('</body></html>')
+    return "\n".join(pieces)
+
+
 class Handler(BaseHTTPRequestHandler):
     refresh_seconds = 5
 
@@ -351,6 +556,22 @@ class Handler(BaseHTTPRequestHandler):
                 self._respond(200, "application/json", body)
             elif path == "/healthz":
                 self._respond(200, "text/plain", b"ok")
+            elif path.startswith("/task/"):
+                sha = path[len("/task/"):].strip("/")
+                detail = fetch_task_detail(sha)
+                if detail is None:
+                    self._respond(404, "text/plain", b"task not found")
+                else:
+                    body = render_task_detail_html(detail, self.refresh_seconds).encode("utf-8")
+                    self._respond(200, "text/html; charset=utf-8", body)
+            elif path.startswith("/api/task/"):
+                sha = path[len("/api/task/"):].strip("/")
+                detail = fetch_task_detail(sha)
+                if detail is None:
+                    self._respond(404, "application/json", b'{"error":"not found"}')
+                else:
+                    body = json.dumps(detail, indent=2, default=str).encode("utf-8")
+                    self._respond(200, "application/json", body)
             elif path in ("/", "/index.html"):
                 full_state = fetch_state()
                 filters = parse_filters(parsed.query)
