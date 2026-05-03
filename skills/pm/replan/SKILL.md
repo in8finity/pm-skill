@@ -63,9 +63,19 @@ Three modes — pick by failure shape, not by habit:
   parent task that rolls up its children (the `--depth ≥1` expansion
   pattern) is NOT auto-invalidated when a child is replanned —
   `system-models/planning_replan_with_parent_gate.als` has a
-  `StaleRollupWitness` scenario showing this. If the parent's rollup
-  depended on the children's prior outcomes, replan the parent
-  separately.
+  `StaleRollupWitness` scenario showing this. Use
+  `--cascade-down-parents` (below) to also invalidate the rollup.
+
+- **cascade-down-parents** (`--cascade-down-parents`, implies
+  `--cascade-down`): in addition to depends_on consumers, also reset
+  every `parentTask` ancestor of the target and of each reset
+  descendant. Use when the target lives in a `--depth ≥1` skill
+  expansion and the parent's report is a rollup of children's
+  outcomes — without this flag, a Done parent stays Done while
+  children get redone, leaving the rollup stale. Verified by
+  `planning_replan_with_parent_gate.als#P6` (closes the hazard) and
+  `#P7` (only affects rollup ancestors + deps descendants, nothing
+  else).
 
 ## Why no dependency rewiring
 

@@ -693,6 +693,46 @@ def find_dependency_descendants(task_sha: str) -> list[str]:
     return out
 
 
+def find_parent_chain_ancestors(task_sha: str) -> list[str]:
+    """Return all ancestor task ``text_sha256`` values reachable via
+    ``links.parentTask`` (the rollup grouping, not depends_on).
+
+    Used by replan.py's ``--cascade-down-parents`` mode to invalidate
+    rollup parents when a child's output changes — closes the stale-
+    rollup hazard surfaced by
+    ``planning_replan_with_parent_gate.als#StaleRollupWitness``.
+
+    Topological order: immediate parent first, root-most ancestor
+    last. Cycles broken by a visited set.
+    """
+    root = get_task(task_sha)
+    if root is None:
+        return []
+    queue = (root.get("attributes") or {}).get("queue", "default")
+    record_to_text = {
+        t["record_sha256"]: t["text_sha256"] for t in list_tasks(queue)
+    }
+    out: list[str] = []
+    visited: set[str] = {task_sha}
+
+    def walk(sha: str) -> None:
+        task = get_task(sha)
+        if task is None:
+            return
+        parent_record = (task.get("links") or {}).get("parentTask")
+        if not parent_record:
+            return
+        parent_text = record_to_text.get(parent_record)
+        if parent_text is None or parent_text in visited:
+            return
+        visited.add(parent_text)
+        out.append(parent_text)
+        walk(parent_text)
+
+    walk(task_sha)
+    return out
+
+
 def reclaim(
     task_sha: str,
     *,

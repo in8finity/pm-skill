@@ -127,6 +127,33 @@ pred replan_cascade_up[target: Task] {
     and (all t: Task - target - ancs | status_after[t] = status[t])
 }
 
+// Cascade-down-parents: implies cascade-down. After resetting the
+// target and every terminal deps-descendant, ALSO reset every terminal
+// parentTask-ancestor of the target and of each reset descendant. This
+// closes the StaleRollupWitness hazard from the basic cascade-down.
+pred replan_cascade_down_parents[target: Task] {
+  status[target] in (SDone + SRejected)
+  status_after[target] = SNew
+  // Set of tasks reset by the deps-descendant pass.
+  let descs       = ^(deps).target,
+      reset_descs = descs & { d: Task | status[d] in (SDone + SRejected) },
+      // Roots whose parent-chains we must invalidate: target ∪ reset_descs.
+      parent_roots = target + reset_descs,
+      // All transitive parentTask ancestors of those roots.
+      rollups     = parent_roots.^parent,
+      reset_rollups = rollups & { r: Task | status[r] in (SDone + SRejected) } |
+    (all d: descs       | status[d] in (SDone + SRejected) =>
+                          status_after[d] = SNew)
+    and (all d: descs   | status[d] not in (SDone + SRejected) =>
+                          status_after[d] = status[d])
+    and (all r: rollups | status[r] in (SDone + SRejected) =>
+                          status_after[r] = SNew)
+    and (all r: rollups | status[r] not in (SDone + SRejected) =>
+                          status_after[r] = status[r])
+    and (all t: Task - target - descs - rollups |
+           status_after[t] = status[t])
+}
+
 // ===== Properties =====
 
 // P1: After any replan action, parent-gate is still consistent — no task
@@ -135,7 +162,8 @@ assert P1_ParentGateHoldsAfterReplan {
   all target: Task |
     (replan_no_cascade[target]
      or replan_cascade_down[target]
-     or replan_cascade_up[target])
+     or replan_cascade_up[target]
+     or replan_cascade_down_parents[target])
     => (all t: Task |
          runnable[t, status_after] =>
            (all c: children[t] | status_after[c] in terminalForParent))
@@ -178,6 +206,37 @@ assert P4_ReplanTargetRunnableWhenUnblocked {
     => runnable[target, status_after]
 }
 check P4_ReplanTargetRunnableWhenUnblocked for 5
+
+// P6: --cascade-down-parents closes the StaleRollupWitness hazard.
+// After replan_cascade_down_parents, no parent (rollup ancestor of the
+// target or of any reset deps-descendant) is left in a terminal state.
+// The dual is true regardless of whether the parent had been Done or
+// Rejected — the rollup is invalidated either way.
+assert P6_CascadeDownParentsClosesStaleRollup {
+  all target: Task |
+    replan_cascade_down_parents[target] =>
+      (let descs = ^(deps).target,
+           reset_descs = descs & { d: Task | status[d] in (SDone + SRejected) },
+           rollup_roots = target + reset_descs,
+           rollups = rollup_roots.^parent |
+         all r: rollups |
+           status[r] in (SDone + SRejected) => status_after[r] = SNew)
+}
+check P6_CascadeDownParentsClosesStaleRollup for 5
+
+// P7: --cascade-down-parents leaves non-rollup, non-deps-descendant
+// tasks alone. Sanity check: it doesn't accidentally invalidate
+// unrelated parts of the queue.
+assert P7_CascadeDownParentsScoped {
+  all target: Task |
+    replan_cascade_down_parents[target] =>
+      (let descs = ^(deps).target,
+           reset_descs = descs & { d: Task | status[d] in (SDone + SRejected) },
+           rollups = (target + reset_descs).^parent |
+         all t: Task - target - descs - rollups |
+           status_after[t] = status[t])
+}
+check P7_CascadeDownParentsScoped for 5
 
 // P5: cascade-down on a middle sibling resets later siblings via deps,
 // but earlier siblings (which the target depends on, not the other way)

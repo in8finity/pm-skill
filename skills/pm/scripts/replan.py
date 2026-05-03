@@ -38,6 +38,16 @@ Three cascade modes (pick by failure shape, not by habit):
     consumed step 3's output) need to redo. Combine with cascade-up
     if both upstream re-derivation and downstream invalidation apply.
 
+  - **cascade-down-parents** (``--cascade-down-parents``, implies
+    ``--cascade-down``): in addition to depends_on consumers, also
+    reset every rollup parent (``parentTask`` chain) of the target
+    and of each reset descendant. Use when the target lives inside a
+    ``--depth ≥1`` skill expansion where the parent's report is a
+    rollup of children's outcomes — replanning a child without this
+    flag leaves a Done parent summarising stale child output (the
+    StaleRollupWitness hazard from
+    ``system-models/planning_replan_with_parent_gate.als``).
+
 Note: replan never rewrites the dependsOn graph. Ancestors keep their
 original sha (in-place reset doesn't change identity); the new target
 task (if adjusted) keeps the SAME ``dependsOn`` list as the original
@@ -46,7 +56,7 @@ since the ancestor shas haven't changed — they've just gone back to
 
 Usage:
   replan.py --task SHA [--text "new body"] [--verifier "..."]
-            [--no-cascade] [--cascade-down] [--note "..."]
+            [--no-cascade] [--cascade-down] [--cascade-down-parents] [--note "..."]
 
 Exit codes:
   0  replan succeeded
@@ -182,6 +192,14 @@ def main() -> int:
                         "and downstream consumers must rebuild (e.g. after "
                         "fixing a bug in an upstream step). Skips already-"
                         "in-flight descendants (new/working).")
+    p.add_argument("--cascade-down-parents", action="store_true",
+                   help="implies --cascade-down. Also reset every rollup "
+                        "parent (parentTask chain) of the target and of "
+                        "each reset descendant. Use for --depth ≥1 skill "
+                        "expansions where the parent's report summarises "
+                        "children — without this flag, a Done parent stays "
+                        "Done while its children get redone, and the "
+                        "rollup is stale.")
     p.add_argument("--note", default="")
     args = p.parse_args()
 
@@ -196,10 +214,16 @@ def main() -> int:
         )
         return 6
 
+    # --cascade-down-parents implies --cascade-down (you can't invalidate
+    # a rollup without also invalidating the children it summarises).
+    if args.cascade_down_parents:
+        args.cascade_down = True
+
     out: dict[str, Any] = {
         "target": args.task,
         "ancestors": [],
         "descendants": [],
+        "rollup_parents": [],
         "target_result": None,
     }
 
@@ -229,6 +253,7 @@ def main() -> int:
     # gone superseded; that's the right blocking behavior to force the
     # user to also rewrite the descendants' depends_on if they actually
     # want them to run against the new clone.
+    reset_descendants: list[str] = []
     if args.cascade_down:
         for desc_sha in store.find_dependency_descendants(args.task):
             desc_cur = store.status_value(store.latest_status(desc_sha))
@@ -245,6 +270,33 @@ def main() -> int:
                 k: v for k, v in res.items()
                 if k in ("text_sha256", "created_at", "skipped", "current")
             }})
+            if not res.get("skipped"):
+                reset_descendants.append(desc_sha)
+
+    # --cascade-down-parents: also invalidate rollup ancestors (parentTask
+    # chain) of the target and of each just-reset descendant. The set is
+    # de-duplicated so a parent that's an ancestor of multiple resets is
+    # only touched once. In-flight parents (new/working/superseded) are
+    # skipped — same policy as cascade-down.
+    if args.cascade_down_parents:
+        seen: set[str] = set()
+        roots = [args.task] + reset_descendants
+        for root in roots:
+            for anc_sha in store.find_parent_chain_ancestors(root):
+                if anc_sha in seen:
+                    continue
+                seen.add(anc_sha)
+                anc_cur = store.status_value(store.latest_status(anc_sha))
+                if anc_cur not in ("done", "rejected"):
+                    out["rollup_parents"].append({
+                        "task": anc_sha, "skipped": True, "current": anc_cur,
+                    })
+                    continue
+                res = reset_in_place(anc_sha, args.note)
+                out["rollup_parents"].append({"task": anc_sha, **{
+                    k: v for k, v in res.items()
+                    if k in ("text_sha256", "created_at", "skipped", "current")
+                }})
 
     has_edit = args.text is not None or args.verifier is not None
     if has_edit:

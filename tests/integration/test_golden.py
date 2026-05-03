@@ -1220,6 +1220,43 @@ def g39_no_cascade_up_alias_still_works() -> None:
               "G39 B reset by --no-cascade-up alias")
 
 
+def g40_replan_cascade_down_parents() -> None:
+    """G40: --cascade-down-parents resets the rollup parent in addition
+    to depends_on consumers — closes the StaleRollupWitness hazard from
+    planning_replan_with_parent_gate.als#P6. Tree shape: par with
+    children k1→k2→k3 chained by deps; all four Done. Replan k2 with
+    --no-cascade --cascade-down-parents → k2/k3 reset, par reset, k1
+    untouched (P7 scope check)."""
+    q = fresh_queue("g40")
+    par = json.loads(pm("plan", "--queue", q, "--title", "P", "--text", "rollup",
+                        env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    k1 = json.loads(pm("plan", "--queue", q, "--title", "K1", "--text", "k1",
+                       "--parent", par,
+                       env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    k2 = json.loads(pm("plan", "--queue", q, "--title", "K2", "--text", "k2",
+                       "--parent", par, "--depends-on", k1,
+                       env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    k3 = json.loads(pm("plan", "--queue", q, "--title", "K3", "--text", "k3",
+                       "--parent", par, "--depends-on", k2,
+                       env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    # Drive all four to done. Parent gate forces k1→k2→k3→par order.
+    for sha in (k1, k2, k3, par):
+        pm("executing", "--task", sha)
+        pm("report", "--task", sha, "--title", "ok", "--text", "ok")
+        pm("finished", "--task", sha)
+
+    pm("replan", "--task", k2, "--no-cascade", "--cascade-down-parents")
+
+    assert_eq(store.status_value(store.latest_status(par)), "new",
+              "G40 par rollup must reset (P6)")
+    assert_eq(store.status_value(store.latest_status(k1)), "done",
+              "G40 k1 (sibling not depending on k2) must be untouched (P7)")
+    assert_eq(store.status_value(store.latest_status(k2)), "new",
+              "G40 k2 (target) reset")
+    assert_eq(store.status_value(store.latest_status(k3)), "new",
+              "G40 k3 (deps-descendant of k2) reset")
+
+
 def g38_replan_cascade_down_skips_inflight() -> None:
     """G38: cascade-down skips descendants that are currently `new` or
     `working` — they'll naturally observe the target's state when their
@@ -1290,6 +1327,7 @@ ALL_FLOWS = {
     "G37": g37_replan_cascade_down,
     "G38": g38_replan_cascade_down_skips_inflight,
     "G39": g39_no_cascade_up_alias_still_works,
+    "G40": g40_replan_cascade_down_parents,
 }
 
 
