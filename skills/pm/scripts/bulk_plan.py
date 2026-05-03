@@ -7,8 +7,11 @@ Input is a JSON array of task specs:
         "slug":   "stable-id",
         "title":  "human label",
         "text":   "full body",
-        "parent": "<task-sha>"        // optional
-        "depends_on": ["sha", ...]    // optional
+        "parent":     "<task-sha>",     // optional
+        "depends_on": ["sha", ...],     // optional
+        "verifier":   "skill:foo",      // optional
+        "sticky":     true,             // optional (auto if parent is sticky)
+        "workdir":    "/abs/path"       // optional (else $PM_WORKDIR or parent's)
       },
       ...
     ]
@@ -30,10 +33,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 import store
+from plan import resolve_workdir
 
 
 def main() -> int:
@@ -67,6 +72,18 @@ def main() -> int:
         text = spec["text"]
         parent = spec.get("parent")
         deps = spec.get("depends_on") or []
+        verifier = spec.get("verifier") or None
+        sticky = bool(spec.get("sticky"))
+        workdir_override = spec.get("workdir")
+
+        # Inherit sticky + workdir from parent (matches plan.py behavior).
+        parent_task = store.get_task(parent) if parent else None
+        if parent_task and not sticky and store.task_is_sticky(parent_task):
+            sticky = True
+        if workdir_override:
+            workdir = workdir_override
+        else:
+            workdir = resolve_workdir(parent_task)
 
         existing = store.find_task_by_slug(args.queue, slug)
         if existing:
@@ -90,6 +107,9 @@ def main() -> int:
                 parent_task_sha=parent,
                 spawned_at_status_sha=spawned_at(parent) if parent else None,
                 depends_on=deps,
+                verifier=verifier,
+                sticky=sticky,
+                workdir=workdir,
             )
             sha = task["text_sha256"]
             store.append_status(sha, "new", note=f"enqueued: {title}")

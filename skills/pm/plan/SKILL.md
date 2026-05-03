@@ -82,6 +82,39 @@ description: >
 3. Output is `{ "task": ..., "status": ... }` — record `task.text_sha256`;
    it is the identifier used by the other planning skills.
 
+### Enqueueing many tasks at once — prefer `pm bulk-plan`
+
+When you are about to enqueue more than ~3 tasks in a row (e.g. one
+task per step of a skill, one task per chunk of a dataset), use
+`pm bulk-plan` instead of looping `pm plan`. One invocation, one
+permission prompt, one transactional summary line — and the canonical
+allowlist target so subsequent runs don't prompt at all.
+
+```bash
+cat > /tmp/plan.json <<'JSON'
+[
+  {"slug":"step-1","title":"Step 1","text":"...", "verifier":"skill:foo","sticky":true},
+  {"slug":"step-2","title":"Step 2","text":"...", "depends_on":["<sha-of-step-1>"]},
+  {"slug":"step-3","title":"Step 3","text":"...", "depends_on":["<sha-of-step-2>"]}
+]
+JSON
+pm bulk-plan --queue Q --input /tmp/plan.json
+```
+
+Per-spec fields: `slug`, `title`, `text` (required); `parent`,
+`depends_on`, `verifier`, `sticky`, `workdir` (optional, same
+semantics as the `pm plan` flags). Sticky and workdir auto-inherit
+from the parent if not given. Output is one TSV line per task
+(`<sha>\t<slug>\t<created|healed|skipped>`) so the chain references
+needed for subsequent specs are easy to splice. Idempotent per
+`(queue, slug)` — re-running with the same input is safe.
+
+**Anti-pattern**: do **not** generate a one-off shell script that
+loops `pm plan` (`for spec in ...; do pm plan ...; done > /tmp/x.sh;
+bash /tmp/x.sh`). That triggers a permission prompt for the generated
+script (Claude Code can't allowlist arbitrary one-shot scripts), and
+loses the per-slug idempotency that `pm bulk-plan` provides.
+
 ## Clustering work by agent
 
 When several tasks share an expensive resource (a set of files, a

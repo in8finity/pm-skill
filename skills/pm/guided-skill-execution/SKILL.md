@@ -62,16 +62,34 @@ description: >
 
 ### Phase 1 — Plan all steps as chained tasks
 
-For each step `(n, title)` in order:
+**Always use `pm bulk-plan`** for the initial Phase-1 enqueue — one
+permission prompt instead of N, and the canonical allowlist target.
+Do **not** generate a one-off `bash /tmp/upload-*.sh` loop of
+`pm plan` calls; that triggers a fresh prompt for the generated
+script every run.
+
+Build a JSON file once, then upload:
 
 ```bash
-~/.claude/skills/planning-shared/pm plan \
-  --queue <queue> \
-  --slug step-<n>-<kebab(title)> \
-  --title "Step <n>: <title>" \
-  --text "<full task body — see below>" \
-  [--depends-on <prev-step-sha>]
+cat > /tmp/plan.json <<'JSON'
+[
+  {"slug":"step-1-clarify-prompt", "title":"Step 1: ...", "text":"<body>"},
+  {"slug":"step-2-identify-entities", "title":"Step 2: ...", "text":"<body>",
+   "depends_on":["<sha-of-step-1>"]},
+  ...
+]
+JSON
+~/.claude/skills/planning-shared/pm bulk-plan --queue <queue> --input /tmp/plan.json
 ```
+
+If you don't yet know the prev step's sha (because you're emitting
+the whole array in one pass), upload a first batch without deps and
+splice the returned shas into a second batch — `pm bulk-plan` is
+idempotent per `(queue, slug)`, so re-running the first batch is
+safe. Two bulk-plan invocations still beats N `pm plan` calls.
+
+For one-off mid-step subtasks (Phase 2, item 4 below), `pm plan` is
+fine — the prompt cost is paid once per subtask, not per chain.
 
 Task body MUST contain:
 - `Driving skill: <skill>` and `Step number: <n>` and `Step title: <title>`.

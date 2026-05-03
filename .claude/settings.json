@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pm executing *)",
+      "Bash(pm report *)",
+      "Bash(pm next *)",
+      "Bash(pm next)",
+      "Bash(pm pull *)",
+      "Bash(pm pull)",
+      "Bash(pm bulk-plan *)",
+      "Bash(pm plan *)",
+      "Bash(pm finished *)",
+      "Bash(pm heartbeat *)",
+      "Bash(pm extract-steps *)",
+      "Bash(pm status *)",
+      "Bash(pm status)",
+      "Bash(pm dashboard *)",
+      "Bash(pm dashboard)",
+      "Bash(pm sweep *)",
+      "Bash(pm context-id)",
+      "Bash(pm context-id *)",
+      "mcp__hashharness__find_items",
+      "mcp__hashharness__verify_chain",
+      "mcp__hashharness__get_work_package"
+    ]
+  }
+}
