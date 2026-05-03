@@ -1257,6 +1257,83 @@ def g40_replan_cascade_down_parents() -> None:
               "G40 k3 (deps-descendant of k2) reset")
 
 
+def g41_cascade_down_parents_two_level_chain() -> None:
+    """G41: --cascade-down-parents walks the parentTask chain
+    transitively. Tree: gp → p → kid (two-level rollup). Replan kid
+    with --no-cascade --cascade-down-parents must reset kid, p, AND
+    gp. Also covers de-duplication (gp would be visited via every
+    path) and the rollup_parents output shape."""
+    q = fresh_queue("g41")
+    gp = json.loads(pm("plan", "--queue", q, "--title", "GP", "--text", "grandparent",
+                       env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    p = json.loads(pm("plan", "--queue", q, "--title", "P", "--text", "parent",
+                      "--parent", gp,
+                      env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    kid = json.loads(pm("plan", "--queue", q, "--title", "K", "--text", "child",
+                        "--parent", p,
+                        env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    # Drive bottom-up (parent gate enforces this anyway).
+    for sha in (kid, p, gp):
+        pm("executing", "--task", sha)
+        pm("report", "--task", sha, "--title", "ok", "--text", "ok")
+        pm("finished", "--task", sha)
+
+    out = json.loads(pm("replan", "--task", kid,
+                        "--no-cascade", "--cascade-down-parents").stdout)
+    rollups = out.get("rollup_parents") or []
+    rollup_shas = {r["task"] for r in rollups}
+    assert rollup_shas == {p, gp}, \
+        f"G41 expected rollup_parents = {{p, gp}}, got {rollup_shas}"
+    for sha, label in ((kid, "kid"), (p, "p"), (gp, "gp")):
+        assert_eq(store.status_value(store.latest_status(sha)), "new",
+                  f"G41 {label} should be `new` after two-level cascade")
+
+
+def g42_cascade_down_parents_no_parent_safe() -> None:
+    """G42: --cascade-down-parents on a top-level task (no parent) is
+    safe — no crash, empty rollup_parents list. Edge case the model
+    handles trivially via empty set semantics."""
+    q = fresh_queue("g42")
+    a = json.loads(pm("plan", "--queue", q, "--title", "A", "--text", "x",
+                      env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    pm("executing", "--task", a)
+    pm("report", "--task", a, "--title", "ok", "--text", "ok")
+    pm("finished", "--task", a)
+
+    out = json.loads(pm("replan", "--task", a,
+                        "--no-cascade", "--cascade-down-parents").stdout)
+    assert_eq(out.get("rollup_parents") or [], [],
+              "G42 expected empty rollup_parents on top-level task")
+    assert_eq(store.status_value(store.latest_status(a)), "new",
+              "G42 target itself still resets")
+
+
+def g43_cascade_down_parents_skips_inflight_parent() -> None:
+    """G43: an in-flight rollup parent (currently `working` or `new`)
+    is skipped — same policy as cascade-down for descendants. Avoids
+    yanking a status out from under an active worker."""
+    q = fresh_queue("g43")
+    par = json.loads(pm("plan", "--queue", q, "--title", "P", "--text", "parent",
+                        env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    kid = json.loads(pm("plan", "--queue", q, "--title", "K", "--text", "kid",
+                        "--parent", par,
+                        env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    # Drive kid to done; parent stays `new` (never claimed).
+    pm("executing", "--task", kid)
+    pm("report", "--task", kid, "--title", "ok", "--text", "ok")
+    pm("finished", "--task", kid)
+    assert_eq(store.status_value(store.latest_status(par)), "new",
+              "G43 sanity: parent stays new")
+
+    out = json.loads(pm("replan", "--task", kid,
+                        "--no-cascade", "--cascade-down-parents").stdout)
+    rollups = out.get("rollup_parents") or []
+    assert len(rollups) == 1, f"G43 expected 1 rollup entry, got {rollups!r}"
+    assert rollups[0].get("skipped") is True, \
+        f"G43 expected the in-flight (`new`) parent skipped; got {rollups[0]!r}"
+    assert_eq(rollups[0].get("current"), "new", "G43 skipped parent current=new")
+
+
 def g38_replan_cascade_down_skips_inflight() -> None:
     """G38: cascade-down skips descendants that are currently `new` or
     `working` — they'll naturally observe the target's state when their
@@ -1328,6 +1405,9 @@ ALL_FLOWS = {
     "G38": g38_replan_cascade_down_skips_inflight,
     "G39": g39_no_cascade_up_alias_still_works,
     "G40": g40_replan_cascade_down_parents,
+    "G41": g41_cascade_down_parents_two_level_chain,
+    "G42": g42_cascade_down_parents_no_parent_safe,
+    "G43": g43_cascade_down_parents_skips_inflight_parent,
 }
 
 

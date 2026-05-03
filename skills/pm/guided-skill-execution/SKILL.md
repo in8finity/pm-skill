@@ -231,6 +231,14 @@ After the last step is `done`, present:
 - The pre-run table is the contract with the user. If the run produces
   more tasks (subtasks, replans), the post-run summary must show them
   alongside the originals so the user can see how the plan evolved.
+- **Replanning a step inside a `--depth ≥1` expansion.** If you have to
+  replan a child task (the step itself failed, the body needs adjustment),
+  the rollup parent stays `Done` by default — its summary is now stale.
+  Use `pm replan --task <child> --no-cascade --cascade-down-parents` to
+  also reset the rollup ancestor(s) so the parent re-derives its summary
+  after the child redoes. See `pm-replan/SKILL.md` for the full mode
+  matrix; the cross-feature soundness is verified in
+  `system-models/planning_replan_with_parent_gate.als` (P6 / P7).
 
 ## Failure modes worth knowing
 
