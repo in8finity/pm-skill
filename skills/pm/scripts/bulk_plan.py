@@ -32,7 +32,10 @@ Behavior is idempotent per slug:
 
 Usage:
   bulk_plan.py [--queue Q] --input path/to/specs.json
-  bulk_plan.py [--queue Q] --input -        # read JSON from stdin
+  bulk_plan.py [--queue Q] --input -                 # read JSON from stdin
+  bulk_plan.py [--queue Q] --input ... --chain-siblings
+      # auto-add depends_on between consecutive specs sharing the same
+      # parent_slug (sequential children). Use for nested-skill expansion.
 
 Stops on the first hard create_task failure (returns exit 1). All other
 outcomes (create, heal, skip) are reported per-line on stdout as TSV:
@@ -54,6 +57,14 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--queue", default="default")
     p.add_argument("--input", required=True, help="path to JSON specs (or - for stdin)")
+    p.add_argument(
+        "--chain-siblings", action="store_true",
+        help="auto-chain consecutive specs sharing the same parent_slug "
+             "via depends_on (in array order). Use this for skill-expansion "
+             "runs where nested steps must execute sequentially under their "
+             "parent. Top-level specs (no parent_slug) are not affected — "
+             "chain those explicitly with depends_on_slugs.",
+    )
     args = p.parse_args()
 
     raw = sys.stdin.read() if args.input == "-" else Path(args.input).read_text()
@@ -61,6 +72,24 @@ def main() -> int:
     if not isinstance(specs, list):
         sys.stderr.write("input must be a JSON array of task specs\n")
         return 2
+
+    # Auto-chain siblings: walk specs in order, remember the last slug
+    # seen per parent_slug, and inject it into the next sibling's
+    # depends_on_slugs (if not already present). Mutates the spec in
+    # place so the rest of the loop processes the augmented version.
+    if args.chain_siblings:
+        last_sibling: dict[str, str] = {}
+        for spec in specs:
+            ps = spec.get("parent_slug")
+            if not ps:
+                continue
+            prior = last_sibling.get(ps)
+            if prior:
+                deps = list(spec.get("depends_on_slugs") or [])
+                if prior not in deps:
+                    deps.append(prior)
+                    spec["depends_on_slugs"] = deps
+            last_sibling[ps] = spec["slug"]
 
     spawned_at_cache: dict[str, str] = {}
 

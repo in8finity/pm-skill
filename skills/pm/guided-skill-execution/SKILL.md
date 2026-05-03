@@ -122,14 +122,29 @@ batch order, so you never need to know shas in advance:
 ]
 ```
 
-**With `--depth ≥1`**, walk the extractor's nested tree:
+**With `--depth ≥1`**, pass `--chain-siblings` to bulk-plan and walk
+the extractor's nested tree:
+
+```bash
+pm bulk-plan --queue <queue> --chain-siblings --input /tmp/plan.json
+```
+
+`--chain-siblings` auto-adds `depends_on` between consecutive specs
+sharing the same `parent_slug` (in array order). That makes nested
+substeps run sequentially under their parent — required for skill
+expansion, since the new parent-rolls-up-children gate (next.py)
+keeps the parent unrunnable until all its children are terminal,
+and parallel sibling claims would defeat the prescribed step order.
+
+Tree shape per spec:
 - The top-level `steps[i]` becomes a parent task (no `parent_slug`,
   but `depends_on_slugs: [<last-child-of-prior-expansion>]` so the
   chain doesn't advance before the previous subskill finishes).
 - Each nested entry under `steps[i].nested[j].steps[k]` becomes a
-  child task with `parent_slug: "step-<i>"` and chains via
-  `depends_on_slugs` on the prior nested child within the same
-  expansion.
+  child task with `parent_slug: "step-<i>"`. With `--chain-siblings`
+  you do NOT need to add `depends_on_slugs` between siblings — the
+  flag does it for you in array order. (You can still set it
+  explicitly to encode a non-array DAG.)
 - Children inherit `sticky` and `workdir` from the parent
   automatically (bulk-plan does this), so a sticky parent makes the
   whole subskill expansion sticky to the same agent context.

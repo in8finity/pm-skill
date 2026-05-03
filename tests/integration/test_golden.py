@@ -1123,6 +1123,47 @@ def g35_childless_task_still_runnable() -> None:
         "G35 childless task must remain runnable"
 
 
+def g36_bulk_plan_chain_siblings() -> None:
+    """G36: bulk-plan --chain-siblings auto-adds depends_on between
+    consecutive specs sharing the same parent_slug. Composes with the
+    parent-children gate (G33/G34) so a depth-≥1 expansion runs nested
+    steps in array order."""
+    q = fresh_queue("g36")
+    spec = json.dumps([
+        {"slug": "par", "title": "P", "text": "parent"},
+        {"slug": "k1",  "title": "K1", "text": "first",  "parent_slug": "par"},
+        {"slug": "k2",  "title": "K2", "text": "second", "parent_slug": "par"},
+        {"slug": "k3",  "title": "K3", "text": "third",  "parent_slug": "par"},
+    ])
+    pm("bulk-plan", "--queue", q, "--chain-siblings", "--input", "-",
+       env_extra={"PM_WORKDIR": ""},
+       cwd=None) if False else subprocess.run(
+        [PM, "bulk-plan", "--queue", q, "--chain-siblings", "--input", "-"],
+        input=spec, text=True, capture_output=True, check=True,
+        env={**os.environ, "PM_WORKDIR": ""},
+    )
+
+    # k1 has no auto-dep (first sibling); k2 depends on k1; k3 depends on k2.
+    k1 = store.find_task_by_slug(q, "k1")
+    k2 = store.find_task_by_slug(q, "k2")
+    k3 = store.find_task_by_slug(q, "k3")
+    k1_record = k1["record_sha256"]
+    k2_record = k2["record_sha256"]
+    assert_eq((k1.get("links") or {}).get("dependsOn") or [], [],
+              "G36 k1 (first sibling) should have no auto-dep")
+    assert_eq((k2.get("links") or {}).get("dependsOn"), [k1_record],
+              "G36 k2 should depend on k1's record_sha256")
+    assert_eq((k3.get("links") or {}).get("dependsOn"), [k2_record],
+              "G36 k3 should depend on k2's record_sha256")
+
+    # pm next must return k1 first — composes with parent-gate from G33.
+    nxt = json.loads(pm("next", "--queue", q,
+                        env_extra={"PM_WORKDIR": ""}).stdout)
+    nxt_slug = (nxt.get("attributes") or {}).get("slug")
+    assert_eq(nxt_slug, "k1",
+              f"G36 expected k1 first under chained-sibling order; got {nxt_slug!r}")
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -1164,6 +1205,7 @@ ALL_FLOWS = {
     "G33": g33_parent_gated_by_pending_children,
     "G34": g34_parent_unblocks_after_children_settle,
     "G35": g35_childless_task_still_runnable,
+    "G36": g36_bulk_plan_chain_siblings,
 }
 
 
