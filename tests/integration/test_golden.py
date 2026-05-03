@@ -301,7 +301,7 @@ def g7_replan_modes() -> None:
     pm("finished", "--task", b, "--rejected")
 
     # (a) --no-cascade-up: only B reset, A stays done.
-    pm("replan", "--task", b, "--no-cascade-up")
+    pm("replan", "--task", b, "--no-cascade")
     assert_eq(store.status_value(store.latest_status(b)), "new",
               "G7a B reset to new")
     assert_eq(store.status_value(store.latest_status(a)), "done",
@@ -326,7 +326,7 @@ def g7_replan_modes() -> None:
 
     out = json.loads(pm(
         "replan", "--task", b, "--text", "rewritten body",
-        "--verifier", "skill:simplify", "--no-cascade-up",
+        "--verifier", "skill:simplify", "--no-cascade",
     ).stdout)
     new_b = out["target_result"]["new_task"]
     assert new_b != b, "G7c clone must have new sha"
@@ -746,7 +746,7 @@ def g23_cancel_superseded_refused() -> None:
     pm("report", "--task", sha, "--title", "r", "--text", "x")
     pm("finished", "--task", sha, "--rejected")
     # Replan with edits → original becomes superseded.
-    pm("replan", "--task", sha, "--text", "v2", "--no-cascade-up")
+    pm("replan", "--task", sha, "--text", "v2", "--no-cascade")
     assert_eq(store.status_value(store.latest_status(sha)), "superseded",
               "G23 setup: original must be superseded")
 
@@ -820,7 +820,7 @@ def g25_replan_skip_on_non_terminal_target() -> None:
                         env_extra={"PM_WORKDIR": ""}).stdout
                      )["task"]["text_sha256"]
     # Task is `new`. In-place replan should skip.
-    out = json.loads(pm("replan", "--task", sha, "--no-cascade-up").stdout)
+    out = json.loads(pm("replan", "--task", sha, "--no-cascade").stdout)
     target_result = out["target_result"]
     assert target_result.get("skipped") is True, \
         f"G25 expected skipped=True for replan of `new` target; got {target_result}"
@@ -831,7 +831,7 @@ def g25_replan_skip_on_non_terminal_target() -> None:
 
     # Now claim it → working. Replan again — also skips.
     pm("executing", "--task", sha)
-    out2 = json.loads(pm("replan", "--task", sha, "--no-cascade-up").stdout)
+    out2 = json.loads(pm("replan", "--task", sha, "--no-cascade").stdout)
     target_result2 = out2["target_result"]
     assert target_result2.get("skipped") is True, \
         f"G25 expected skipped=True for replan of `working` target; got {target_result2}"
@@ -1188,13 +1188,36 @@ def g37_replan_cascade_down() -> None:
     assert_eq(store.status_value(store.latest_status(s3)), "done", "G37 s3 done before replan")
 
     # Replan s1 with cascade-down (no cascade-up: s1 has no upstream).
-    pm("replan", "--task", s1, "--no-cascade-up", "--cascade-down")
+    pm("replan", "--task", s1, "--no-cascade", "--cascade-down")
 
     # Both descendants must now be `new` again.
     for label, sha in (("s1", s1), ("s2", s2), ("s3", s3)):
         cur = store.status_value(store.latest_status(sha))
         assert_eq(cur, "new",
                   f"G37 {label} should be `new` after cascade-down; got {cur!r}")
+
+
+def g39_no_cascade_up_alias_still_works() -> None:
+    """G39: back-compat — the original `--no-cascade-up` still works as
+    an alias for `--no-cascade` after the rename. Anything that pre-
+    dates the rename (allowlists, scripts, the worktree under .claude/)
+    keeps functioning."""
+    q = fresh_queue("g39")
+    a = json.loads(pm("plan", "--queue", q, "--title", "A", "--text", "x",
+                      env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    b = json.loads(pm("plan", "--queue", q, "--title", "B", "--text", "y",
+                      "--depends-on", a,
+                      env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    for sha in (a, b):
+        pm("executing", "--task", sha)
+        pm("report", "--task", sha, "--title", "ok", "--text", "ok")
+        pm("finished", "--task", sha)
+    # Use the OLD flag name explicitly.
+    pm("replan", "--task", b, "--no-cascade-up")
+    assert_eq(store.status_value(store.latest_status(a)), "done",
+              "G39 A untouched by --no-cascade-up alias")
+    assert_eq(store.status_value(store.latest_status(b)), "new",
+              "G39 B reset by --no-cascade-up alias")
 
 
 def g38_replan_cascade_down_skips_inflight() -> None:
@@ -1214,7 +1237,7 @@ def g38_replan_cascade_down_skips_inflight() -> None:
     # s2 stays `new` — never claimed.
 
     out = json.loads(pm("replan", "--task", s1,
-                        "--no-cascade-up", "--cascade-down").stdout)
+                        "--no-cascade", "--cascade-down").stdout)
     descs = out.get("descendants") or []
     assert len(descs) == 1, f"G38 expected 1 descendant entry, got {descs!r}"
     assert descs[0].get("skipped") is True, \
@@ -1266,6 +1289,7 @@ ALL_FLOWS = {
     "G36": g36_bulk_plan_chain_siblings,
     "G37": g37_replan_cascade_down,
     "G38": g38_replan_cascade_down_skips_inflight,
+    "G39": g39_no_cascade_up_alias_still_works,
 }
 
 

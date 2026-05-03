@@ -13,7 +13,7 @@ description: >
 
 ## Procedure
 
-`../scripts/pm replan --task <sha> [--text "..."] [--verifier "..."] [--no-cascade-up] [--note "..."]`
+`../scripts/pm replan --task <sha> [--text "..."] [--verifier "..."] [--no-cascade] [--cascade-down] [--note "..."]`
 
 ## Two modes
 
@@ -34,14 +34,38 @@ description: >
 
 ## Cascade behavior
 
-By default `replan` walks `links.dependsOn` upstream from the target
-and resets every ancestor that is currently `done` or `rejected` back
-to `new` (in-place — ancestor body adjustments are not supported via
-this command; replan each ancestor separately if you need to edit
-them). Ancestors already in `new` or `working` are left alone — they're
-already pending or in flight.
+Three modes — pick by failure shape, not by habit:
 
-`--no-cascade-up` limits the operation to the target only.
+- **cascade-up** (default): walk `links.dependsOn` upstream from the
+  target and reset every ancestor currently in `done` or `rejected`
+  back to `new`. Use when you suspect *upstream output is wrong* — bad
+  ideas → bad cross-refs, stale model output → broken downstream
+  parsing. The whole upstream chain is re-derived before the target
+  runs again. Ancestors already in `new` / `working` / `superseded`
+  are left alone.
+
+- **no-cascade** (`--no-cascade`): just reset the target. Use when the
+  failure was *transient or environmental* — sandbox died, network
+  blip, OOM, agent crashed mid-step. The target's inputs were fine; it
+  just didn't get to do its work. **This is the right pick for "I need
+  to re-run this one task" — most replans.** The flag's old name
+  `--no-cascade-up` still works as a back-compat alias.
+
+- **cascade-down** (`--cascade-down`): also reset every task that
+  transitively lists the target in its `dependsOn` (the consumers of
+  the target's output). Use when the target's *output is now invalid*
+  and downstream artifacts built on it are stale — classic case: you
+  fixed a bug in step 3, so steps 4/5/6 (which consumed step 3's
+  output) need to redo. Combine with `cascade-up` if both upstream
+  re-derivation and downstream invalidation apply.
+
+  Note: cascade-down walks `dependsOn` only, NOT `parentTask`. A
+  parent task that rolls up its children (the `--depth ≥1` expansion
+  pattern) is NOT auto-invalidated when a child is replanned —
+  `system-models/planning_replan_with_parent_gate.als` has a
+  `StaleRollupWitness` scenario showing this. If the parent's rollup
+  depended on the children's prior outcomes, replan the parent
+  separately.
 
 ## Why no dependency rewiring
 
