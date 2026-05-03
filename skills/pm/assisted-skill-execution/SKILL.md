@@ -42,6 +42,11 @@ defaults flow through without dialogue.
 - `--prompt <text>` — the problem statement / objective.
 - `--queue <name>` — optional override; default is `skill-exec:<skill>:<UTC-timestamp>`.
 - `--workdir <path>` — optional override; default is `cwd`.
+- `--depth <N>` — nested-skill expansion depth, same semantics as
+  `pm-guided-skill-execution`'s `--depth`. Default `0` (flat). At
+  depth ≥1, subskill steps become real child tasks under the parent
+  step. The default-pick + escalate policy applies to nested steps
+  exactly as it does to top-level ones.
 - `--always-ask <pattern>` — optional repeatable; substring patterns that
   force the assisted mode to escalate any gate whose skill section text
   matches. Useful for "ask me about anything that says 'scope'".

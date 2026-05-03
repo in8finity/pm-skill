@@ -32,6 +32,11 @@ the skill must be logged.
 - `--prompt <text>` — the problem statement / objective.
 - `--queue <name>` — optional override; default is `skill-exec:<skill>:<UTC-timestamp>`.
 - `--workdir <path>` — optional override; default is `cwd`.
+- `--depth <N>` — nested-skill expansion depth, same semantics as
+  `pm-guided-skill-execution`'s `--depth`. Default `0` (flat). At
+  depth ≥1, subskill steps become real child tasks under the parent
+  step and execute via the same auto-pick rules; the post-run
+  summary lists nested expansions alongside the originals.
 
 ## Procedure
 

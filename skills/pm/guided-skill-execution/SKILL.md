@@ -29,32 +29,60 @@ description: >
 - `--prompt <text>` — the problem statement / objective the skill is being applied to.
 - `--queue <name>` — optional override; default is `skill-exec:<skill>:<UTC-timestamp>`.
 - `--workdir <path>` — optional override; default is `cwd`.
+- `--depth <N>` — how many levels of nested-skill recursion to expand
+  as subtasks. Default `0` (flat: each step is one task, even if the
+  step says "invoke skill X"). Use `1` to expand one level: step
+  `9: Run loop` invoking `formal-debugger` becomes parent task `9`
+  plus one subtask per debugger step (`9.formal-debugger.1`,
+  `9.formal-debugger.2`, …). `2` expands two levels deep. Higher
+  values multiply queue size aggressively (depth-2 over a 10-step
+  skill invoking 7-step subskills ≈ 70 tasks); use `1` as the common
+  case and `2` only for cluster-style runs you want fully tracked.
 
 ## Procedure
 
 ### Phase 0 — Step extraction and pre-run table
 
-1. Run the extractor:
+1. Run the depth-aware extractor:
    ```bash
-   python3 ~/.claude/skills/pm-skill-shared/extract_steps.py <skill>
+   ~/.claude/skills/planning-shared/pm extract-steps <skill> --max-depth <N>
    ```
-   Output is JSON: `{skill, skill_path, strategy, steps: [{n, title, anchor}, ...]}`.
+   where `<N>` is the `--depth` input (default `0`). Output is JSON:
+   `{skill, skill_path, strategy, max_depth, steps: [...]}`.
+   At depth 0, each step is `{n, title, anchor, subskills_invoked, verified}`.
+   At depth ≥1, a step that invokes another skill carries a `nested`
+   array of `{skill, steps: [...], strategy}` entries; nested step ids
+   are dotted (e.g. `9.formal-debugger.1`) so the call chain is
+   unambiguous when many subskills are present.
+
+   For depth 0, `extract_steps.py <skill>` (the regex-only fallback)
+   is also acceptable when `claude` isn't on PATH.
 
 2. **Print the pre-run table to the user** before any task is enqueued:
    ```
    Skill: <skill>          (path: <skill_path>)
    Prompt: <prompt>
    Queue: <queue>
-   Extraction strategy: <strategy>
+   Extraction strategy: <strategy>          Subtask depth: <N>
 
    Steps → planned tasks:
-     Step <n>  <title>          → slug: step-<n>-<kebab(title)>
+     Step <n>      <title>                  → slug: step-<n>-<kebab(title)>
+       └─ subskill <X> (expanded, <K> nested steps):
+          Step <n.X.1>  <title>             → slug: step-<n>-<X>-1-<kebab>
+          Step <n.X.2>  <title>             → slug: step-<n>-<X>-2-<kebab>
      ...
    ```
+   Indent nested rows under their parent so the user can see at a glance
+   which subskills got expanded (and at what depth).
+
    If the strategy is `top-level-sections` or returned `<2` steps, also tell
    the user: *"The target skill has no obvious step structure; I'm using
    top-level section headings as steps. Please confirm or supply your own
    step list."*
+
+   If any step has `verified: false` (LLM extractor returned an anchor
+   the source SKILL.md doesn't contain verbatim), flag it explicitly and
+   ask the user to confirm or correct that row before enqueueing.
 
 3. **Wait for user confirmation.** Acceptable replies: "ok", "go", "yes",
    any explicit affirmative, or a corrected step list. Silence is not
@@ -87,6 +115,24 @@ the whole array in one pass), upload a first batch without deps and
 splice the returned shas into a second batch — `pm bulk-plan` is
 idempotent per `(queue, slug)`, so re-running the first batch is
 safe. Two bulk-plan invocations still beats N `pm plan` calls.
+
+**With `--depth ≥1`**, walk the extractor's nested tree:
+- The top-level `steps[i]` becomes a parent task (no `parent` field,
+  but `depends_on: [<prev top-level sha>]` to keep the linear chain).
+- Each nested entry under `steps[i].nested[j].steps[k]` becomes a
+  child task with `parent: <sha-of-steps[i]>`. Inside the parent's
+  expansion, chain the children with `depends_on` on the prior
+  child. Children inherit `sticky` and `workdir` from the parent
+  automatically (bulk-plan does this), so a sticky parent makes the
+  whole subskill expansion sticky to the same agent context.
+- The next top-level step's `depends_on` should target the **last
+  child** of the prior parent's expansion, not the parent itself —
+  otherwise the chain advances before the subskill finishes.
+
+Two-batch upload pattern handles the dependency cross-references
+without complex sha plumbing: batch 1 = all parents (no children),
+batch 2 = children + the next-top-level depends_on fixups. Re-run
+of batch 1 is a no-op (idempotent).
 
 For one-off mid-step subtasks (Phase 2, item 4 below), `pm plan` is
 fine — the prompt cost is paid once per subtask, not per chain.
