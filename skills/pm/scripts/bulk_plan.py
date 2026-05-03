@@ -128,6 +128,28 @@ def main() -> int:
         parent = spec.get("parent")
         if not parent and spec.get("parent_slug"):
             parent = resolve_slug(spec["parent_slug"])
+
+        # NoSelfParent + NoCycle on parentTask graph (mirrors plan.py).
+        # parent_slug resolution naturally catches self-reference (the
+        # spec being processed isn't yet in slug_to_sha and find_task_by
+        # _slug fails before this loop adds it), but the sha-form
+        # `parent` field can refer to anything — guard it explicitly.
+        if parent:
+            own_sha = store.sha256_text(store.task_identity_text(args.queue, slug))
+            if parent == own_sha:
+                sys.stderr.write(
+                    f"refusing slug={slug}: parent is this task's own sha "
+                    f"({own_sha[:12]}) — self-parent invalid\n"
+                )
+                sys.exit(11)
+            if own_sha in store.find_parent_chain_ancestors(parent):
+                sys.stderr.write(
+                    f"refusing slug={slug}: parent chain transitively "
+                    f"contains this task's sha ({own_sha[:12]}) — would "
+                    f"create a parentTask cycle\n"
+                )
+                sys.exit(11)
+
         deps = list(spec.get("depends_on") or [])
         for dep_slug in (spec.get("depends_on_slugs") or []):
             deps.append(resolve_slug(dep_slug))

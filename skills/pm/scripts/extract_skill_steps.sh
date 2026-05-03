@@ -65,10 +65,20 @@ if [[ "$mode" == "auto" ]]; then
   fi
 fi
 
+# Normalise subskill references that come back from LLM extraction with
+# leading "/" or "skill:" prefixes — these are how SKILL.md authors invoke
+# slash-commands or scoped skills, but the on-disk files don't have those
+# prefixes in their directory names.
+skill_name="${skill_name#/}"
+skill_name="${skill_name#skill:}"
+
 # Resolve SKILL.md path if only name was given.
+# Search order: user skills, project commands, user commands, plugin skills.
 if [[ -z "$skill_path" ]]; then
   for cand in \
       "$HOME/.claude/skills/$skill_name/SKILL.md" \
+      "$PWD/.claude/commands/$skill_name.md" \
+      "$HOME/.claude/commands/$skill_name.md" \
       "$HOME/.claude/plugins/marketplaces"/*/skills/"$skill_name"/SKILL.md \
       "$HOME/.claude/plugins/cache"/*/*/*/skills/"$skill_name"/SKILL.md \
       "$HOME/.claude/plugins/cache"/*/*/skills/"$skill_name"/SKILL.md \

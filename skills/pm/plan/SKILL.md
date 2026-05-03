@@ -222,9 +222,15 @@ existing slug-key Task) |
 | 4 | Slug already taken in this queue (either pre-check found it, or a
 concurrent `plan` claimed it first) |
 | 5 | `--parent` was provided but parent has no status yet |
-| 11 | Invalid `--depends-on`: self-loop, non-existent target, or target
-already terminal-not-done (`rejected`/`superseded`). See the
-`--depends-on` description above for the three sub-cases. |
+| 11 | Invalid graph at enqueue time. Sub-cases:
+  - **`--depends-on` self-loop** (sha equals this task's prospective sha)
+  - **`--depends-on` non-existent target** (sha doesn't resolve to a stored Task)
+  - **`--depends-on` forever-blocked target** (target's latest status is `rejected` / `superseded`)
+  - **`--parent` self-parent** (sha equals this task's prospective sha)
+  - **`--parent` cycle** (parent chain transitively contains this task's sha)
+
+  Verified by `system-models/planning_parent_gate.als#{NoSelfParent, NoCycle}`
+  for the parent cases, and `planning.als` `plan[t]` precondition for the dep cases. |
 
 ## Slug uniqueness (structurally enforced)
 

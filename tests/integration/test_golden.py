@@ -1257,6 +1257,71 @@ def g40_replan_cascade_down_parents() -> None:
               "G40 k3 (deps-descendant of k2) reset")
 
 
+def g45_self_parent_refused() -> None:
+    """G45: pm plan --parent <self-sha> exits 11 (NoSelfParent). The
+    deterministic sha of `task:<queue>/<slug>` is computable by a
+    caller, so the refusal must be at the gate — not relied on as a
+    structural impossibility. Closes the long-standing modeling-debt
+    item flagged in two prior reconciliations:
+    planning_parent_gate.als#NoSelfParent is now enforced, not just
+    assumed."""
+    q = fresh_queue("g45")
+    # Compute the prospective sha for slug "x" in this queue and try to
+    # use it as --parent of the same plan call.
+    own_sha = store.sha256_text(store.task_identity_text(q, "x"))
+    p = pm("plan", "--queue", q, "--title", "X", "--text", "self",
+           "--slug", "x", "--parent", own_sha,
+           env_extra={"PM_WORKDIR": ""}, check=False)
+    assert_eq(p.returncode, 11,
+              f"G45 expected exit 11 on self-parent; got {p.returncode}")
+
+
+def g44_superseded_child_is_terminal_for_parent_gate() -> None:
+    """G44: parent-gate treats a `superseded` child as terminal — the
+    parent becomes runnable even when its only child was replanned with
+    body adjustment (which marks the original superseded). Closes the
+    coverage gap on
+    planning_parent_gate.als#SupersededChildIsTerminalForGate.
+    """
+    q = fresh_queue("g44")
+    par = json.loads(pm("plan", "--queue", q, "--title", "P", "--text", "parent",
+                        env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    kid = json.loads(pm("plan", "--queue", q, "--title", "K", "--text", "kid",
+                        "--parent", par,
+                        env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    # Drive kid to done so we can replan-with-edit (which supersedes it).
+    pm("executing", "--task", kid)
+    pm("report", "--task", kid, "--title", "ok", "--text", "ok")
+    pm("finished", "--task", kid)
+    # Replan with adjusted body → kid becomes `superseded`, a kid-rN clone
+    # is created (with the same parent, so par now has two children).
+    pm("replan", "--task", kid, "--no-cascade", "--text", "v2")
+    assert_eq(store.status_value(store.latest_status(kid)), "superseded",
+              "G44 sanity: original kid is superseded after replan-with-text")
+
+    # The clone (kid-r1) is `new` — par should NOT be runnable yet,
+    # because the clone is a non-terminal child.
+    nxt = json.loads(pm("next", "--queue", q,
+                        env_extra={"PM_WORKDIR": ""}).stdout)
+    nxt_slug = (nxt.get("attributes") or {}).get("slug") if nxt else None
+    assert nxt_slug != "p", \
+        f"G44 par must NOT be runnable while kid-r1 is `new`; got {nxt_slug!r}"
+
+    # Drive the clone to done.
+    clone = store.find_task_by_slug(q, "k-r1")
+    clone_sha = clone["text_sha256"]
+    pm("executing", "--task", clone_sha)
+    pm("report", "--task", clone_sha, "--title", "ok", "--text", "ok")
+    pm("finished", "--task", clone_sha)
+
+    # Now both children are terminal (one superseded, one done) — par
+    # must be the next runnable task.
+    nxt2 = json.loads(pm("next", "--queue", q,
+                         env_extra={"PM_WORKDIR": ""}).stdout)
+    assert nxt2 is not None and nxt2["text_sha256"] == par, \
+        "G44 par must be runnable once {superseded kid + done clone} both terminal"
+
+
 def g41_cascade_down_parents_two_level_chain() -> None:
     """G41: --cascade-down-parents walks the parentTask chain
     transitively. Tree: gp → p → kid (two-level rollup). Replan kid
@@ -1408,6 +1473,8 @@ ALL_FLOWS = {
     "G41": g41_cascade_down_parents_two_level_chain,
     "G42": g42_cascade_down_parents_no_parent_safe,
     "G43": g43_cascade_down_parents_skips_inflight_parent,
+    "G44": g44_superseded_child_is_terminal_for_parent_gate,
+    "G45": g45_self_parent_refused,
 }
 
 

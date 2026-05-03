@@ -2,9 +2,11 @@
 name: pm-next
 description: >
   Return the next runnable planning task as JSON, or "null" if the queue is
-  empty / blocked. A task is runnable when its current TaskStatus is "new"
-  and every task in its dependsOn list has status "done". Use when the user
-  says "next task", "what's next", "pull next", or before spawning a worker.
+  empty / blocked. A task is runnable when its current TaskStatus is "new",
+  every task in its dependsOn list has status "done", and every direct child
+  (via parentTask) has reached a terminal status (done/rejected/superseded).
+  Use when the user says "next task", "what's next", "pull next", or before
+  spawning a worker.
 ---
 
 # pm:next — pull the next runnable task
@@ -28,7 +30,16 @@ description: >
    claimed, done, or rejected).
 4. Skip tasks where any `links.dependsOn` target's latest status is not
    `done`. This is the dependency gate.
-5. Return the first survivor.
+5. Skip tasks that have at least one direct child (task whose
+   `parentTask` link points back at this one) whose latest status is
+   not in `{done, rejected, superseded}`. This is the
+   **parent-rolls-up-children gate** — a wrapper task expanded into a
+   subskill (via `pm-{auto,assisted,guided}-skill-execution --depth ≥1`)
+   stays unrunnable until its expansion completes, so the wrapper's
+   rollup report is written *after* the children's outcomes are
+   known. Verified by `system-models/planning_parent_gate.als` (6
+   assertions, scope 6) and tests G33/G34/G35.
+6. Return the first survivor.
 
 ## Workdir binding
 

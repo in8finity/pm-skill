@@ -79,11 +79,34 @@ def main() -> int:
 
     spawned_at = None
     if args.parent:
+        # NoSelfParent — checked BEFORE the existence check, since the
+        # caller can compute the deterministic own_sha without the task
+        # existing yet. Symmetric to the depends_on self-loop guard
+        # below; verified by planning_parent_gate.als#NoSelfParent which
+        # the model previously assumed satisfied-by-construction.
+        own_sha = store.sha256_text(store.task_identity_text(args.queue, slug))
+        if args.parent == own_sha:
+            sys.stderr.write(
+                f"refusing: --parent is this task's own sha "
+                f"({own_sha[:12]}) — self-parent is invalid\n"
+            )
+            return 11
+
         parent_status = store.latest_status(args.parent)
         if parent_status is None:
             sys.stderr.write(f"parent {args.parent} has no status — cannot spawn subtask\n")
             return 5
         spawned_at = parent_status["text_sha256"]
+
+        # NoCycle on parentTask graph — only meaningful once the parent
+        # exists (we need a chain to walk). Verified by
+        # planning_parent_gate.als#NoCycle.
+        if own_sha in store.find_parent_chain_ancestors(args.parent):
+            sys.stderr.write(
+                f"refusing: --parent chain transitively contains this "
+                f"task's sha ({own_sha[:12]}) — would create a parentTask cycle\n"
+            )
+            return 11
 
     deps = [d.strip() for d in args.depends_on.split(",") if d.strip()]
 
