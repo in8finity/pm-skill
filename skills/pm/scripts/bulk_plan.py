@@ -7,14 +7,23 @@ Input is a JSON array of task specs:
         "slug":   "stable-id",
         "title":  "human label",
         "text":   "full body",
-        "parent":     "<task-sha>",     // optional
-        "depends_on": ["sha", ...],     // optional
-        "verifier":   "skill:foo",      // optional
-        "sticky":     true,             // optional (auto if parent is sticky)
-        "workdir":    "/abs/path"       // optional (else $PM_WORKDIR or parent's)
+        "parent":          "<task-sha>",       // optional
+        "parent_slug":     "earlier-slug",     // optional alt to parent
+        "depends_on":      ["sha", ...],       // optional
+        "depends_on_slugs":["earlier-slug",...],// optional alt to depends_on
+        "verifier":        "skill:foo",        // optional
+        "sticky":          true,               // optional (auto from parent)
+        "workdir":         "/abs/path"         // optional (else env / parent's)
       },
       ...
     ]
+
+`parent_slug` and `depends_on_slugs` resolve to text_sha256s of tasks
+referenced by slug in the same queue — either created earlier in this
+same batch, or already-existing tasks. This makes single-batch nested
+trees workable without computing shas in advance: declare parents
+before children in the array, use slug references throughout, and
+bulk-plan resolves them in order.
 
 Behavior is idempotent per slug:
 - new slug                    -> create Task + genesis TaskStatus(new)
@@ -65,13 +74,34 @@ def main() -> int:
         spawned_at_cache[parent_sha] = s["text_sha256"]
         return spawned_at_cache[parent_sha]
 
+    # slug → text_sha256 for tasks created earlier in this batch (or
+    # discovered via find_task_by_slug for slugs that pre-exist).
+    slug_to_sha: dict[str, str] = {}
+
+    def resolve_slug(slug_ref: str) -> str:
+        if slug_ref in slug_to_sha:
+            return slug_to_sha[slug_ref]
+        existing = store.find_task_by_slug(args.queue, slug_ref)
+        if existing:
+            slug_to_sha[slug_ref] = existing["text_sha256"]
+            return slug_to_sha[slug_ref]
+        sys.stderr.write(
+            f"slug-reference '{slug_ref}' could not be resolved — must be "
+            f"created earlier in this batch or already exist in queue '{args.queue}'\n"
+        )
+        sys.exit(7)
+
     created = healed = skipped = 0
     for spec in specs:
         slug = spec["slug"]
         title = spec["title"]
         text = spec["text"]
         parent = spec.get("parent")
-        deps = spec.get("depends_on") or []
+        if not parent and spec.get("parent_slug"):
+            parent = resolve_slug(spec["parent_slug"])
+        deps = list(spec.get("depends_on") or [])
+        for dep_slug in (spec.get("depends_on_slugs") or []):
+            deps.append(resolve_slug(dep_slug))
         verifier = spec.get("verifier") or None
         sticky = bool(spec.get("sticky"))
         workdir_override = spec.get("workdir")
@@ -96,6 +126,7 @@ def main() -> int:
                 skipped += 1
                 outcome = "skipped"
             print(f"{sha}\t{slug}\t{outcome}")
+            slug_to_sha[slug] = sha
             continue
 
         try:
@@ -115,6 +146,7 @@ def main() -> int:
             store.append_status(sha, "new", note=f"enqueued: {title}")
             created += 1
             print(f"{sha}\t{slug}\tcreated")
+            slug_to_sha[slug] = sha
         except Exception as exc:  # hard failure: stop
             sys.stderr.write(f"FAIL slug={slug}: {exc}\n")
             sys.stderr.write(f"created={created} healed={healed} skipped={skipped}\n")

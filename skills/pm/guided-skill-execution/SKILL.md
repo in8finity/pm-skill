@@ -110,29 +110,34 @@ JSON
 ~/.claude/skills/planning-shared/pm bulk-plan --queue <queue> --input /tmp/plan.json
 ```
 
-If you don't yet know the prev step's sha (because you're emitting
-the whole array in one pass), upload a first batch without deps and
-splice the returned shas into a second batch — `pm bulk-plan` is
-idempotent per `(queue, slug)`, so re-running the first batch is
-safe. Two bulk-plan invocations still beats N `pm plan` calls.
+Use `parent_slug` and `depends_on_slugs` so the whole tree uploads
+in **one** bulk-plan call — bulk-plan resolves slug references in
+batch order, so you never need to know shas in advance:
+
+```json
+[
+  {"slug":"step-1", "title":"Step 1", "text":"<body>"},
+  {"slug":"step-2", "title":"Step 2", "text":"<body>",
+   "depends_on_slugs":["step-1"]}
+]
+```
 
 **With `--depth ≥1`**, walk the extractor's nested tree:
-- The top-level `steps[i]` becomes a parent task (no `parent` field,
-  but `depends_on: [<prev top-level sha>]` to keep the linear chain).
+- The top-level `steps[i]` becomes a parent task (no `parent_slug`,
+  but `depends_on_slugs: [<last-child-of-prior-expansion>]` so the
+  chain doesn't advance before the previous subskill finishes).
 - Each nested entry under `steps[i].nested[j].steps[k]` becomes a
-  child task with `parent: <sha-of-steps[i]>`. Inside the parent's
-  expansion, chain the children with `depends_on` on the prior
-  child. Children inherit `sticky` and `workdir` from the parent
+  child task with `parent_slug: "step-<i>"` and chains via
+  `depends_on_slugs` on the prior nested child within the same
+  expansion.
+- Children inherit `sticky` and `workdir` from the parent
   automatically (bulk-plan does this), so a sticky parent makes the
   whole subskill expansion sticky to the same agent context.
-- The next top-level step's `depends_on` should target the **last
-  child** of the prior parent's expansion, not the parent itself —
-  otherwise the chain advances before the subskill finishes.
 
-Two-batch upload pattern handles the dependency cross-references
-without complex sha plumbing: batch 1 = all parents (no children),
-batch 2 = children + the next-top-level depends_on fixups. Re-run
-of batch 1 is a no-op (idempotent).
+Bulk-plan stays idempotent per `(queue, slug)`, so re-running the
+same JSON is safe — failed mid-upload runs can simply be retried.
+A bad slug-reference (typo, or a child placed before its parent in
+the array) exits 7 with a specific error before any partial damage.
 
 For one-off mid-step subtasks (Phase 2, item 4 below), `pm plan` is
 fine — the prompt cost is paid once per subtask, not per chain.
