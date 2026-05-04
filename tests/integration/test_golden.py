@@ -1729,6 +1729,48 @@ def g57_parent_finish_succeeds_after_children_settle() -> None:
               "G57 parent must close to done after kid settles")
 
 
+def g58_cancel_cascades_by_default() -> None:
+    """G58: bare `pm cancel --task <root>` (no flag) cascades to every
+    descendant via parentTask reverse-links — closes the orphan-grandchild
+    gap. Use --no-cascade to opt out for the rare leaf-only case.
+    Verified by planning_cancel_cascade.als#CC1, CC4."""
+    q = fresh_queue("g58")
+    a = json.loads(pm("plan", "--queue", q, "--title", "A", "--text", "root",
+                      env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    b = json.loads(pm("plan", "--queue", q, "--title", "B", "--text", "child",
+                      "--parent", a,
+                      env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    c = json.loads(pm("plan", "--queue", q, "--title", "C", "--text", "grandchild",
+                      "--parent", b,
+                      env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    pm("executing", "--task", a)
+    pm("executing", "--task", b)
+    pm("executing", "--task", c)
+    # Bare cancel — no flags. New default: cascade.
+    pm("cancel", "--task", a, "--reason", "G58")
+    for sha, label in ((a, "A"), (b, "B"), (c, "C")):
+        assert_eq(store.status_value(store.latest_status(sha)), "rejected",
+                  f"G58 {label} must be rejected by default cancel cascade")
+
+
+def g59_cancel_no_cascade_opt_out() -> None:
+    """G59: `pm cancel --task <root> --no-cascade` rejects only the
+    target, leaving descendants alone. Legacy escape hatch."""
+    q = fresh_queue("g59")
+    a = json.loads(pm("plan", "--queue", q, "--title", "A", "--text", "root",
+                      env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    b = json.loads(pm("plan", "--queue", q, "--title", "B", "--text", "child",
+                      "--parent", a,
+                      env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    pm("executing", "--task", a)
+    pm("executing", "--task", b)
+    pm("cancel", "--task", a, "--no-cascade", "--reason", "G59 leaf-only")
+    assert_eq(store.status_value(store.latest_status(a)), "rejected",
+              "G59 A must be rejected (the explicit target)")
+    assert_eq(store.status_value(store.latest_status(b)), "working",
+              "G59 B must remain working under --no-cascade")
+
+
 def g54_parent_chain_cycle_refused() -> None:
     """G54: NoCycle on parentTask. bulk_plan with a spec whose `parent`
     chain transitively contains the spec's own deterministic sha (slug)
@@ -1847,6 +1889,8 @@ ALL_FLOWS = {
     "G54": g54_parent_chain_cycle_refused,
     "G56": g56_parent_finish_blocked_while_children_pending,
     "G57": g57_parent_finish_succeeds_after_children_settle,
+    "G58": g58_cancel_cascades_by_default,
+    "G59": g59_cancel_no_cascade_opt_out,
 }
 
 

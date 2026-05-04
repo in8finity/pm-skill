@@ -78,8 +78,17 @@ def main() -> int:
     p.add_argument("--task", required=True)
     p.add_argument("--reason", default="cancelled by supervisor")
     p.add_argument("--cancelled-by", default=default_canceller())
-    p.add_argument("--cascade", action="store_true",
-                   help="recursively cancel undone subtasks (parentTask reverse-links)")
+    p.add_argument("--cascade", dest="cascade", action="store_true",
+                   default=True,
+                   help="recursively cancel undone subtasks (parentTask "
+                        "reverse-links). Default since v0.3 — cancelling "
+                        "without cascading orphans grandchildren, which "
+                        "the queue can't recover automatically.")
+    p.add_argument("--no-cascade", dest="cascade", action="store_false",
+                   help="reject only the target; leave descendants alone. "
+                        "Use only when you genuinely want orphan children "
+                        "to keep running (rare). This is the legacy "
+                        "(<v0.3) behavior.")
     args = p.parse_args()
 
     primary = cancel_one(args.task, reason=args.reason,

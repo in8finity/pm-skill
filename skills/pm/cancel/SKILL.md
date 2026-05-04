@@ -12,7 +12,7 @@ description: >
 
 ## Procedure
 
-`../scripts/pm cancel --task <task-sha> [--reason "..."] [--cancelled-by ID] [--cascade]`
+`../scripts/pm cancel --task <task-sha> [--reason "..."] [--cancelled-by ID] [--no-cascade]`
 
 - Reads the latest TaskStatus for `<task-sha>`. Refuses with exit code 6
   if the task's current status is `done`, `rejected`, or `superseded`
@@ -26,8 +26,16 @@ description: >
   - `links.task = <task-sha>`
   - `links.prevStatus = <latest-status-sha>`
   - `links.proof = <synthetic-report-sha>`
-- If `--cascade` is set, recursively cancels unfinished subtasks linked by
-  `parentTask`.
+- **Cascade is the default** (since v0.3): the cancel recursively visits
+  every unfinished descendant via `parentTask` reverse-links and rejects
+  them with the same reason. This avoids orphaned grandchildren — the
+  failure mode where rejecting a parent left its subtree running, with
+  no automatic mechanism to pull them down.
+- Pass `--no-cascade` to opt out (legacy behavior). Use only when you
+  genuinely want orphan children to keep running, which is rare; the
+  alternative — a sibling group cancelled but their grandchildren still
+  busy — is almost always a bug. `--cascade` is also accepted as a
+  no-op for back-compat with scripts that pass it explicitly.
 
 ## Exit codes
 
