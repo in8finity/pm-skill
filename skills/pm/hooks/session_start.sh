@@ -22,6 +22,20 @@
 
 set -u
 
+# Make the `pm` wrapper reachable as a bare command in THIS (orchestrator)
+# session. Empirically, sub-agents spawned via the Agent tool do NOT
+# inherit $CLAUDE_ENV_FILE — they get a fresh env from the user profile.
+# So this PATH munge helps the orchestrator only. For sub-agents, the
+# project allowlist must permit the relative form
+# `skills/pm/scripts/pm <verb> *` and worker prompts should invoke pm
+# via that relative path (workers' cwd is the project root). See
+# `skills/pm/execute/SKILL.md` "Permission allowlist gotchas" for the
+# full story.
+if [[ -n "${CLAUDE_PROJECT_DIR:-}" && -d "$CLAUDE_PROJECT_DIR/skills/pm/scripts" \
+      && -n "${CLAUDE_ENV_FILE:-}" && -w "$(dirname "$CLAUDE_ENV_FILE")" ]]; then
+  echo "PATH=$CLAUDE_PROJECT_DIR/skills/pm/scripts:$PATH" >> "$CLAUDE_ENV_FILE"
+fi
+
 # Candidate env file locations, in priority order. First match wins.
 ENV_CANDIDATES=(
   "${HASHHARNESS_ENV:-}"

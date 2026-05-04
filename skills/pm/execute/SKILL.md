@@ -116,10 +116,32 @@ rejected, tasks left (should be zero or blocked-on-deps).
 ### Permission allowlist gotchas (sub-agent invocation)
 
 Sub-agents typically run under a permission allowlist that constrains
-which Bash commands they can execute. Two patterns reliably break a
-worker the FIRST time it runs `pm next`; both are subtle and hard to
-diagnose from the worker's side ("Permission denied" looks identical
-to "your environment is broken"):
+which Bash commands they can execute. The matcher is a **literal-
+string prefix check on the command** — there is no PATH resolution,
+no executable normalisation, no $env-var expansion. So `Bash(pm next *)`
+matches `pm next --queue Q` but NOT `/abs/path/skills/pm/scripts/pm
+next --queue Q`. The allowlist must carry one entry per invocation
+form a worker might use.
+
+**The orchestrator-side fix**: when constructing worker prompts, always
+invoke pm via the **project-relative path** `skills/pm/scripts/pm
+<verb>`, never an absolute path. Workers' cwd defaults to the project
+root, so the relative form resolves correctly, and a single allowlist
+entry `Bash(skills/pm/scripts/pm *)` covers every verb. Bare `pm
+<verb>` works in the orchestrator session (the SessionStart hook
+prepends the script dir to PATH) but **does not** work in sub-agents
+because they don't inherit `$CLAUDE_ENV_FILE` PATH munging — confirmed
+empirically with a probe.
+
+Three patterns reliably break a worker the FIRST time it runs `pm
+next`; all are subtle and hard to diagnose from the worker's side
+("Permission denied" looks identical to "your environment is broken"):
+
+0. **Absolute path doesn't match bare-name allowlist.** `Bash(pm
+   next *)` does NOT match `/Users/.../skills/pm/scripts/pm next ...`
+   in a sub-agent. Use the relative form in worker prompts AND
+   allowlist `Bash(skills/pm/scripts/pm *)` (already in this project's
+   `.claude/settings.json`).
 
 1. **Trailing space-star requires args.** `Bash(pm next *)` matches
    `pm next --queue Q` but NOT bare `pm next` (no args). If your
