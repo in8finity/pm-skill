@@ -169,15 +169,39 @@ trap "rm -f $work" EXIT
 printf '%s' "$llm_out" > "$work"
 
 # ---- bash-side validation: anchor must be a substring of the source ----
+# In addition to verified=bool, capture:
+#   line_number    — 1-indexed line of the anchor's first match (or null)
+#   body_lines     — [start, end] lines spanning this step's body (anchor
+#                    line through the line before the next step's anchor,
+#                    or end of file). Used by build_task_body.py to
+#                    splice the verbatim spec into the worker's task body.
 
 if [[ "$validate" == "yes" ]]; then
   python3 -c "
 import json, sys
-src = open('$skill_path').read()
+src_lines = open('$skill_path').read().splitlines()
+src_text = '\n'.join(src_lines)
 data = json.load(open('$work'))
+
+# First pass: line_number per step.
 for step in data.get('steps', []):
     anchor = step.get('anchor', '')
-    step['verified'] = bool(anchor) and (anchor in src)
+    step['verified'] = bool(anchor) and (anchor in src_text)
+    step['line_number'] = None
+    if step['verified']:
+        for i, ln in enumerate(src_lines, start=1):
+            if anchor in ln:
+                step['line_number'] = i
+                break
+
+# Second pass: body_lines = [own line_number, next step's line_number - 1].
+verified = [s for s in data.get('steps', []) if s.get('line_number')]
+verified.sort(key=lambda s: s['line_number'])
+for i, s in enumerate(verified):
+    start = s['line_number']
+    end = (verified[i+1]['line_number'] - 1) if i+1 < len(verified) else len(src_lines)
+    s['body_lines'] = [start, end]
+
 open('$work', 'w').write(json.dumps(data))
 "
 fi

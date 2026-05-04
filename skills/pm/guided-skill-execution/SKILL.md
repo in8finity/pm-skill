@@ -157,31 +157,51 @@ the array) exits 7 with a specific error before any partial damage.
 For one-off mid-step subtasks (Phase 2, item 4 below), `pm plan` is
 fine — the prompt cost is paid once per subtask, not per chain.
 
-Task body MUST contain ALL of these — workers read the body in
-isolation and have no other channel to learn what step they're on:
+**Build each task body via `pm build-task-body`** — do NOT compose
+the body yourself. The helper reads the extractor's JSON, splices the
+verbatim step spec from the source SKILL.md (with explicit
+`Reference: <skill_path>:<line>` and `Step lines: <start>-<end>`
+fields), and writes a fully-formed body to stdout. This eliminates
+the "Substep EIAC-S7." placeholder anti-pattern by construction —
+no LLM-composed body ever exists.
 
-- `Driving skill: <skill>` and `Step number: <n>` and `Step title: <title>`.
-- `Prompt: <prompt>` (the original problem statement).
-- `Skill anchor:` quoting the matched line from the SKILL.md (the `anchor`
-  field from the extractor) so a worker can grep back to the source.
-- **`Step spec:`** — the verbatim text of the step from the source SKILL.md
-  (or, if the step's body is huge, a tight 2-3 sentence paraphrase of
-  what the step prescribes plus a `(see <skill_path>#<anchor>)` pointer).
-  Without this, the worker has to re-discover the contract by reading
-  the source skill themselves on every run.
-- `Mode: guided` (so the worker knows to pause for user input at gates).
-- `Workdir: <workdir>`.
-- `Reference: <skill_path>` — absolute path so the worker can read the
-  full skill text when the inline spec isn't enough.
+```bash
+# 1. Extract once, write to a temp file the build-task-body calls reference.
+pm extract-steps <skill> --max-depth <N> > /tmp/steps.json
 
-**Anti-pattern (caught in real-world feedback):** do NOT emit
-`"Substep EIAC-S7."` (or any single-line placeholder) as the body and
-expect the worker to re-derive the contract from the slug. The body
-IS the spec; an empty body means every worker has to round-trip
-through the source SKILL.md, which defeats the queue's audit value
-and burns context unnecessarily. If you find yourself writing a body
-shorter than the JSON spec for the bulk-plan entry, you're under-
-specifying the task.
+# 2. Per step, ask the helper for a body string.
+body=$(pm build-task-body \
+  --steps /tmp/steps.json \
+  --step <n>            \
+  --prompt "<original problem statement>" \
+  --mode guided         \
+  --workdir <workdir>)
+
+# 3. Splice into a bulk-plan spec.
+jq -nc --arg b "$body" '{slug:"step-<n>-<kebab>", title:"Step <n>: <title>", text:$b}' \
+  >> /tmp/plan.jsonl
+```
+
+The helper guarantees the body contains: driving skill name + path,
+step number + title, anchor, **`Reference: <path>:<line>`** (so a
+worker can `Read(file_path=<path>, offset=<line>, limit=<N>)` directly
+to the prescribed step), `Step lines: <start>-<end>`, subskills
+invoked, mode, workdir, prompt, and the verbatim step spec from the
+SKILL.md between the anchor line and the next step's anchor.
+
+Workers learn this body shape once and scan it deterministically;
+they don't have to round-trip through the source SKILL.md to discover
+the contract. The Reference field is there for when they want more
+context than the splice covers.
+
+**If you must hand-roll a body** (e.g. an ad-hoc mid-step subtask
+that wasn't in the extractor output), include at minimum: a `Step
+spec:` paragraph with the verbatim or tight-paraphrased contract,
+`Reference: <skill_path>:<line>` if applicable, `Mode:`, `Workdir:`,
+and `Prompt:`. Slug-only bodies (`"Substep EIAC-S7."`) are refused
+by skilled reviewers and force every worker to re-derive the
+contract from the source — defeating the queue's audit value and
+burning context.
 
 Record each task's `text_sha256`. The `--depends-on` flag links each step
 to the previous one — the queue is a strict chain, not parallel work.
