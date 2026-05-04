@@ -68,6 +68,15 @@ def main() -> int:
             d_text = record_to_text.get(d_record)
             return d_text is not None and status_of(d_text) == "done"
 
+        def parent_claimed(t: dict) -> bool:
+            parent_record = (t.get("links") or {}).get("parentTask")
+            if not parent_record:
+                return True
+            parent_text = record_to_text.get(parent_record)
+            if parent_text is None:
+                return True
+            return status_of(parent_text) != "new"
+
         candidate = None
         for t in tasks:
             sha = t["text_sha256"]
@@ -76,8 +85,9 @@ def main() -> int:
             deps = (t.get("links") or {}).get("dependsOn") or []
             if not all(dep_done(d) for d in deps):
                 continue
-            # Parent-rolls-up gate moved to finish-time (see next.py).
-            # Parents are claimable as soon as their deps are done.
+            # See next.py for the rationale on the parent-claim gate.
+            if not parent_claimed(t):
+                continue
             candidate = t
             break
 

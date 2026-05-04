@@ -1830,6 +1830,41 @@ def g61_bulk_plan_finalize_slug_collision_refused() -> None:
               f"stderr: {proc.stderr}")
 
 
+def g62_child_blocked_until_parent_claimed() -> None:
+    """G62: under the parent-claim gate (since v0.5), a child is not
+    returned by `pm next` until its parent's status is non-`new`.
+    Once the parent is claimed (status=working), the child becomes
+    runnable. Verified by planning_parent_gate.als#
+    ChildBlockedUntilParentClaimed and #ChildRunnableOnceParentClaimed."""
+    q = fresh_queue("g62")
+    par = json.loads(pm("plan", "--queue", q, "--title", "P", "--text", "parent",
+                        env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    kid = json.loads(pm("plan", "--queue", q, "--title", "K", "--text", "kid",
+                        "--parent", par,
+                        env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    nxt = json.loads(pm("next", "--queue", q,
+                        env_extra={"PM_WORKDIR": ""}).stdout)
+    assert_eq(nxt["text_sha256"], par,
+              "G62 pm next must return the parent first (FIFO; child blocked)")
+    pm("executing", "--task", par)
+    nxt2 = json.loads(pm("next", "--queue", q,
+                         env_extra={"PM_WORKDIR": ""}).stdout)
+    assert_eq(nxt2["text_sha256"], kid,
+              "G62 child must be returned once parent is in `working`")
+
+
+def g63_top_level_task_unaffected_by_parent_gate() -> None:
+    """G63: a top-level task (no parent) is unaffected by the parent-
+    claim gate; the gate only fires on tasks with a parentTask link."""
+    q = fresh_queue("g63")
+    a = json.loads(pm("plan", "--queue", q, "--title", "A", "--text", "top",
+                      env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    nxt = json.loads(pm("next", "--queue", q,
+                        env_extra={"PM_WORKDIR": ""}).stdout)
+    assert_eq(nxt["text_sha256"], a,
+              "G63 top-level task must be runnable immediately")
+
+
 def g54_parent_chain_cycle_refused() -> None:
     """G54: NoCycle on parentTask. bulk_plan with a spec whose `parent`
     chain transitively contains the spec's own deterministic sha (slug)
@@ -1952,6 +1987,8 @@ ALL_FLOWS = {
     "G59": g59_cancel_no_cascade_opt_out,
     "G60": g60_bulk_plan_finalize_slug,
     "G61": g61_bulk_plan_finalize_slug_collision_refused,
+    "G62": g62_child_blocked_until_parent_claimed,
+    "G63": g63_top_level_task_unaffected_by_parent_gate,
 }
 
 

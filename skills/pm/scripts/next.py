@@ -64,6 +64,23 @@ def main() -> int:
             return False
         return status_of(d_text) == "done"
 
+    def parent_claimed(t: dict) -> bool:
+        """A child is runnable only after its parent's lifecycle has begun.
+        Parent-claim gate enforces the convention "parent owns the
+        subtree's lifecycle / binds the context": children can't start
+        until somebody has claimed the parent. A parent in `working` /
+        `done` / `rejected` / `superseded` satisfies the gate (the
+        lifecycle has begun). Cross-queue parent treated as "no parent"
+        for the gate (the gate is about co-queue lifecycle ownership).
+        See planning_parent_gate.als#ChildBlockedUntilParentClaimed."""
+        parent_record = (t.get("links") or {}).get("parentTask")
+        if not parent_record:
+            return True  # no parent — top-level task
+        parent_text = record_to_text.get(parent_record)
+        if parent_text is None:
+            return True  # cross-queue parent — not our gate to enforce
+        return status_of(parent_text) != "new"
+
     workdir_skipped = 0
     for t in tasks:
         sha = t["text_sha256"]
@@ -76,15 +93,8 @@ def main() -> int:
         deps = (t.get("links") or {}).get("dependsOn") or []
         if not all(dep_done(d) for d in deps):
             continue
-        # Parent-rolls-up gate moved to finish-time. A parent is now
-        # claimable as soon as its deps are done — the queue convention
-        # is that parents are grouping/contexting nodes, not work nodes,
-        # so claiming them early just holds the lifecycle lease. The
-        # rollup-summary work belongs in a final child task that depends
-        # on every sibling. finished.py refuses to close a parent while
-        # any child is still pending (exit 14). See
-        # skills/pm/plan/SKILL.md "Parents are grouping nodes" and
-        # planning_parent_gate.als#ParentNotFinishedWhilePendingChild.
+        if not parent_claimed(t):
+            continue
         print(json.dumps(t, indent=2))
         return 0
 

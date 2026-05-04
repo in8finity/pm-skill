@@ -1,6 +1,6 @@
 [project]
 name = "hashharness-pm"
-version = "0.4.0"
+version = "0.5.0"
 description = "Planning board for parallel Claude Code agents, backed by hashharness append-only hash-chained storage. Race-safe claims, sticky context, parent grouping with finish-time rollup gate, replan with cascade modes. 68 Alloy invariants verified; 57 golden integration flows."
 requires-python = ">=3.10"
 readme = "README.md"

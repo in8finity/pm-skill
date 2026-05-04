@@ -52,16 +52,16 @@ fun children[p: Task] : set Task { parent.p }
 // (Done — successful; Rejected/Superseded — terminal failure or replacement.)
 fun terminalForParent : set Status { SDone + SRejected + SSuperseded }
 
-// A task is runnable iff status=New AND its deps are settled.
-// PARENTS ARE NOT BLOCKED BY PENDING CHILDREN at runnable-time. The
-// queue convention is that parents are grouping/contexting nodes —
-// they hold the lifecycle lease over the subtree but do no work in
-// their own body. Rollup-summary work belongs in a final child task
-// that depends on every sibling. The rollup-after-children invariant
-// lives at finish-time (`finishable[]` below).
+// A task is runnable iff status=New AND its parent (if any) has
+// already been claimed (parent.status != SNew). The parent-claim
+// gate enforces the convention "parent owns the subtree's
+// lifecycle / binds the context": children can't start until somebody
+// has claimed the parent. The rollup-after-children invariant lives
+// at finish-time (`finishable[]` below).
 // depends_on omitted — composed orthogonally at the code level.
 pred runnable[t: Task] {
   t.status = SNew
+  no t.parent or t.parent.status != SNew
 }
 
 // A task is finishable iff it's currently working AND every child is
@@ -106,69 +106,78 @@ assert SDoneChainRecursesToGrandchildren {
 }
 check SDoneChainRecursesToGrandchildren for 6
 
-// ---- liveness: a parent with pending children IS still runnable —
-// the orchestrator can pick it up to bind the lifecycle / context now,
-// and only the close is gated. ----
-assert ParentRunnableEvenWithPendingChildren {
+// ---- liveness: a parent (no parent of its own) with pending children
+// IS still runnable — the orchestrator can pick it up to bind the
+// lifecycle / context now, and only the close is gated. ----
+assert TopLevelTaskAlwaysRunnable {
   all t: Task |
-    t.status = SNew => runnable[t]
+    (t.status = SNew and no t.parent) => runnable[t]
 }
-check ParentRunnableEvenWithPendingChildren for 6
+check TopLevelTaskAlwaysRunnable for 6
 
-// ---- liveness: settled children unblock the parent ----
-assert ParentRunnableAfterChildrenSettle {
+// ---- safety: a child whose parent is still SNew is NOT runnable —
+// parent-claim gate enforces the lifecycle ordering. ----
+assert ChildBlockedUntilParentClaimed {
   all t: Task |
-    (t.status = SNew and all c: children[t] | c.status in terminalForParent)
+    (some t.parent and t.parent.status = SNew)
+      => not runnable[t]
+}
+check ChildBlockedUntilParentClaimed for 6
+
+// ---- liveness: once parent is non-SNew, a SNew child IS runnable. ----
+assert ChildRunnableOnceParentClaimed {
+  all t: Task |
+    (t.status = SNew and some t.parent and t.parent.status != SNew)
       => runnable[t]
 }
-check ParentRunnableAfterChildrenSettle for 6
+check ChildRunnableOnceParentClaimed for 6
 
-// ---- sanity: no self-blocking ----
-assert NoSelfBlocking {
-  all t: Task | t.status = SNew and no children[t] => runnable[t]
+// Helper: parent-claim precondition for the runnable assertions below.
+// (Top-level tasks always satisfy this; children require a non-SNew parent.)
+pred parentClaimed[t: Task] {
+  no t.parent or t.parent.status != SNew
 }
-check NoSelfBlocking for 6
 
-// ---- backward-compatibility: depth-0 / flat queues unchanged ----
+// ---- liveness: a SNew task whose parent is claimed (or absent) IS
+// runnable. Children-state doesn't matter — the rollup invariant is
+// at finish-time, not runnable-time. ----
 assert ChildlessNewTaskRunnable {
-  all t: Task | (t.status = SNew and no children[t]) => runnable[t]
+  all t: Task |
+    (t.status = SNew and no children[t] and parentClaimed[t])
+      => runnable[t]
 }
 check ChildlessNewTaskRunnable for 6
 
-// ---- terminal-for-gate semantics ----
-// A parent whose only children are Rejected is still runnable; otherwise
-// a failed subtree would strand the parent forever.
-assert RejectedChildIsTerminalForGate {
+assert NoSelfBlocking {
   all t: Task |
-    (t.status = SNew
-     and some children[t]
-     and all c: children[t] | c.status = SRejected)
+    (t.status = SNew and no children[t] and parentClaimed[t])
       => runnable[t]
 }
-check RejectedChildIsTerminalForGate for 6
-
-// Likewise for Superseded — replan/replacement should not strand the parent.
-assert SupersededChildIsTerminalForGate {
-  all t: Task |
-    (t.status = SNew
-     and some children[t]
-     and all c: children[t] | c.status = SSuperseded)
-      => runnable[t]
-}
-check SupersededChildIsTerminalForGate for 6
+check NoSelfBlocking for 6
 
 // ---- concrete scenarios ----
 
-// Witness: a parent with a Working child IS still runnable — the
-// orchestrator can pick it up early to bind the lifecycle / context,
-// the rollup invariant only applies at finish-time.
+// Witness: a top-level parent with a Working child IS still runnable
+// — the orchestrator can pick it up early to bind the lifecycle.
 run RunnableEvenWithPendingChild {
   some p: Task |
     p.status = SNew
+    and no p.parent
     and #children[p] = 2
     and (some c: children[p] | c.status = SWorking)
     and runnable[p]
 } for 4
+
+// Witness: a child of a SNew parent is NOT runnable — must wait for
+// the parent to be claimed.
+run TryChildRunWithUnclaimedParent {
+  some disj p, c: Task |
+    c.parent = p
+    and p.status = SNew
+    and c.status = SNew
+    and runnable[c]
+} for 4
+expect 0
 
 // Witness: a parent in `working` cannot finish while a child is
 // pending — the rollup invariant holds at finish-time.

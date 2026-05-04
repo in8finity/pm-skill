@@ -33,18 +33,19 @@ import sys
 import store
 
 
-def default_agent_id() -> str:
+def default_agent_id(context_id: str | None = None) -> str:
     """Agent identifier for the claim. Resolution order:
         1. ``$PM_AGENT_ID`` (explicit override)
-        2. ``worker-<PM_CONTEXT_ID[:12]>`` if a context_id is set —
-           stable across subshells of the same session, so the
-           heartbeat that follows a claim from a fresh subshell still
-           owns the lease.
+        2. ``worker-<context-id[:12]>`` if a context_id is supplied
+           (via --context-id flag or $PM_CONTEXT_ID env) — stable across
+           subshells of the same session, so the heartbeat that follows
+           a claim from a fresh subshell still owns the lease.
         3. ``hostname-pid`` (legacy fallback for non-sticky one-shots)
     """
     if env := os.environ.get("PM_AGENT_ID"):
         return env
-    if ctx := os.environ.get("PM_CONTEXT_ID"):
+    ctx = context_id or os.environ.get("PM_CONTEXT_ID")
+    if ctx:
         return f"worker-{ctx[:12]}"
     return f"{socket.gethostname()}-{os.getpid()}"
 
@@ -52,12 +53,17 @@ def default_agent_id() -> str:
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--task", required=True)
-    p.add_argument("--agent", default=default_agent_id())
+    p.add_argument("--agent", default=None,
+                   help="agent identifier (default: $PM_AGENT_ID, else "
+                        "worker-<context-id[:12]> from --context-id flag or "
+                        "$PM_CONTEXT_ID env, else hostname-pid)")
     p.add_argument("--note", default="",
                    help="ignored (legacy compat); use --agent for claimant id")
     p.add_argument("--context-id", default=None,
                    help="sticky context id (overrides $PM_CONTEXT_ID)")
     args = p.parse_args()
+    if args.agent is None:
+        args.agent = default_agent_id(args.context_id)
 
     latest_before = store.latest_status(args.task)
     current = store.status_value(latest_before)
