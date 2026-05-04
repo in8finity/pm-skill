@@ -83,7 +83,7 @@ A gate is **routine** (default-pick) when:
 
 ### Phase 0 — Step extraction and pre-run table
 
-Identical to auto / guided: run `python3 ~/.claude/skills/pm-skill-shared/extract_steps.py <skill>`, print the pre-run table, get one
+Identical to auto / guided: run `skills/pm/scripts/pm extract-steps <skill>`, print the pre-run table, get one
 confirmation from the user. The table now also lists, for each step, the
 **predicted gate kind**: `routine` (auto-default), `critical` (will pause),
 `mandatory` (will pause if preconditions fail). The user can override with
@@ -172,7 +172,7 @@ For each task in order:
 
 5. After the step's prescribed work is done, write the report:
    ```bash
-   ~/.claude/skills/planning-shared/pm report --task <sha> \
+   skills/pm/scripts/pm report --task <sha> \
      --title "Step <n>: <title> — <one-line outcome>" --text-file <path>
    ```
    The report MUST contain:

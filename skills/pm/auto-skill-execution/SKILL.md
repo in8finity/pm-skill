@@ -44,7 +44,7 @@ the skill must be logged.
 
 1. Run the extractor:
    ```bash
-   python3 ~/.claude/skills/pm-skill-shared/extract_steps.py <skill>
+   skills/pm/scripts/pm extract-steps <skill>
    ```
 
 2. **Print the pre-run table to the user**:
@@ -102,7 +102,7 @@ For each task in order:
    reject the task with the reason; do not silently complete.
 6. After the step's prescribed work is done, write the report:
    ```bash
-   ~/.claude/skills/planning-shared/pm report --task <sha> \
+   skills/pm/scripts/pm report --task <sha> \
      --title "Step <n>: <title> — <one-line outcome>" --text-file <path>
    ```
    Report MUST contain a section `## Auto-decisions made` listing each

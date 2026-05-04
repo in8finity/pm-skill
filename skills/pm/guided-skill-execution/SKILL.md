@@ -45,7 +45,7 @@ description: >
 
 1. Run the depth-aware extractor:
    ```bash
-   ~/.claude/skills/planning-shared/pm extract-steps <skill> --max-depth <N>
+   skills/pm/scripts/pm extract-steps <skill> --max-depth <N>
    ```
    where `<N>` is the `--depth` input (default `0`). Output is JSON:
    `{skill, skill_path, strategy, max_depth, steps: [...]}`.
@@ -107,7 +107,7 @@ cat > /tmp/plan.json <<'JSON'
   ...
 ]
 JSON
-~/.claude/skills/planning-shared/pm bulk-plan --queue <queue> --input /tmp/plan.json
+skills/pm/scripts/pm bulk-plan --queue <queue> --input /tmp/plan.json
 ```
 
 Use `parent_slug` and `depends_on_slugs` so the whole tree uploads
@@ -223,14 +223,14 @@ For each task in order:
    wants to defer or branch on (e.g., "first explore option A, then come
    back"), open a subtask:
    ```bash
-   ~/.claude/skills/planning-shared/pm plan --queue <queue> \
+   skills/pm/scripts/pm plan --queue <queue> \
      --parent <current-step-sha> --slug <stable-id> \
      --title "..." --text "..."
    ```
    Then claim and execute the subtask before resuming the parent step.
 5. After the step's prescribed work is done, write the report:
    ```bash
-   ~/.claude/skills/planning-shared/pm report --task <sha> \
+   skills/pm/scripts/pm report --task <sha> \
      --title "Step <n>: <title> — <one-line outcome>" --text-file <path>
    ```
    The report MUST record:
@@ -239,7 +239,7 @@ For each task in order:
    - Any deviations from the skill's prescribed step (and why).
 6. Mark done:
    ```bash
-   ~/.claude/skills/planning-shared/pm finished --task <sha>
+   skills/pm/scripts/pm finished --task <sha>
    ```
 7. Briefly summarise the step outcome to the user before pulling the next
    one. Pause for the user's go-ahead — guided mode treats the boundary
