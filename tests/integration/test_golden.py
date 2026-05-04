@@ -1674,6 +1674,38 @@ def g52_replan_cascade_directions_dual() -> None:
               "G52 dir2: A reset by cascade-up on B")
 
 
+def g54_parent_chain_cycle_refused() -> None:
+    """G54: NoCycle on parentTask. bulk_plan with a spec whose `parent`
+    chain transitively contains the spec's own deterministic sha (slug)
+    → exit 11. Construction: pre-build A→B via parentTask, then
+    bulk_plan a spec with slug="a" and parent=B's sha. The would-be
+    own_sha is sha(task:Q/a) = existing A's sha; find_parent_chain_
+    ancestors(B) = {A}; cycle detected. The cycle check (bulk_plan.py
+    line 145) fires BEFORE the slug-uniqueness check (line 169), so
+    this surfaces the defensive NoCycle guard. Verified by
+    planning_parent_gate.als#NoCycle."""
+    q = fresh_queue("g54")
+    a = json.loads(pm("plan", "--queue", q, "--slug", "a",
+                      "--title", "A", "--text", "root",
+                      env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    b = json.loads(pm("plan", "--queue", q, "--slug", "b",
+                      "--title", "B", "--text", "child",
+                      "--parent", a,
+                      env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    # Spec: re-create slug "a" but with parent=B → would close A→B→A cycle.
+    spec = json.dumps([{"slug": "a", "title": "A_again",
+                        "text": "would close cycle", "parent": b}])
+    proc = subprocess.run(
+        [PM, "bulk-plan", "--queue", q, "--input", "-"],
+        input=spec, capture_output=True, text=True,
+        env={**os.environ, "PM_WORKDIR": ""},
+    )
+    assert_eq(proc.returncode, 11,
+              f"G54 bulk_plan cycle should exit 11; got {proc.returncode}\nstderr: {proc.stderr}")
+    assert "cycle" in (proc.stderr or "").lower(), \
+        f"G54 stderr should mention cycle; got: {proc.stderr!r}"
+
+
 def g53_cross_queue_isolation() -> None:
     """G53: Q2 — `pm next --queue Q1` never returns a Q2 task and vice
     versa. Cross-queue isolation is structural in store.list_tasks (the
@@ -1757,6 +1789,7 @@ ALL_FLOWS = {
     "G51": g51_sticky_chain_conflict_refused,
     "G52": g52_replan_cascade_directions_dual,
     "G53": g53_cross_queue_isolation,
+    "G54": g54_parent_chain_cycle_refused,
 }
 
 
