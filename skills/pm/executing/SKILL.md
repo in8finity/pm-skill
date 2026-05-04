@@ -26,6 +26,31 @@ description: >
   (**claim race lost**) — caller MUST drop the task.
 - On success (exit 0), prints the created TaskStatus as JSON.
 
+## Sticky-context binding
+
+If the task's `attributes.sticky` is set, the claim is a **binding** event:
+the agent's `$PM_CONTEXT_ID` (or `--context-id`) is recorded on the
+working TaskStatus and becomes the only context allowed to advance
+this task's chain (heartbeat, report, finished) — and the only context
+allowed to claim any sticky descendant via `parentTask` or `dependsOn`.
+
+The check runs in `store.check_sticky_eligibility` at every chain-
+advancing call site (`pm executing` / `pm heartbeat` / `pm report` /
+`pm finished`). A mismatch — wrong context, missing context when sticky
+is required, or two distinct contexts already bound across the sticky
+chain — refuses with **exit 10** ("sticky-context refusal").
+
+A sticky binding is established only at claim time and cleared only by
+reclaim. After reclaim the task is `new` with no `context_id`, so any
+agent context can rebind it (subject to the chain coherence rule).
+**Done sticky ancestors continue to require their original context** —
+the binding persists on the terminal TaskStatus for audit, and
+`task_context_id()` reads the latest status.
+
+See `system-models/planning.als` (`StickyChainCoherence`,
+`StickyBindingOnlyAtClaim`) and `system-models/planning_sticky_rebinding.als`
+(SR1–SR5).
+
 ## Exit codes
 
 | Code | Meaning |
@@ -33,6 +58,7 @@ description: >
 | 0 | Claim won; this agent owns the task |
 | 6 | Pre-claim refusal: task was not in state `new` |
 | 8 | Claim race lost: another agent claimed off the same prev-tip first |
+| 10 | Sticky-context refusal: bound context mismatch or chain conflict |
 
 ## Concurrency note
 
