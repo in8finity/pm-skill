@@ -1091,13 +1091,26 @@ def g34_parent_unblocks_after_children_settle() -> None:
                          "--parent", par, env_extra={"PM_WORKDIR": ""})
                       .stdout)["task"]["text_sha256"]
 
-    # Drive kid1 → done, kid2 → rejected.
+    # Claim parent first (lifecycle binding); then drive children.
+    pm("executing", "--task", par)
     pm("executing", "--task", kid1)
     pm("report", "--task", kid1, "--title", "k1 ok", "--text", "ok")
     pm("finished", "--task", kid1)
     pm("executing", "--task", kid2)
     pm("report", "--task", kid2, "--title", "k2 fail", "--text", "x")
     pm("finished", "--task", kid2, "--rejected")
+
+    # Parent should now be returned by pm next (it's in `working`, but
+    # that doesn't disqualify it from being inspected via pm next — it
+    # IS already claimed; pm next won't return it because status != new).
+    # Actually: parent is `working` so pm next won't return it. The dual
+    # being tested here is "parent is finishable now"; verify via
+    # finished succeeding.
+    pm("report", "--task", par, "--title", "rollup", "--text", "all settled")
+    pm("finished", "--task", par)
+    assert_eq(store.status_value(store.latest_status(par)), "done",
+              "G34 parent must close once both kids are terminal")
+    return  # bypass the legacy pm-next check below
 
     # Parent should now be returned by pm next.
     nxt = json.loads(pm("next", "--queue", q,
@@ -1248,11 +1261,15 @@ def g40_replan_cascade_down_parents() -> None:
     k3 = json.loads(pm("plan", "--queue", q, "--title", "K3", "--text", "k3",
                        "--parent", par, "--depends-on", k2,
                        env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
-    # Drive all four to done. Parent gate forces k1→k2→k3→par order.
-    for sha in (k1, k2, k3, par):
+    # Claim par first (parent-claim gate); then drive children to done
+    # in dep order, finally close par after children settle.
+    pm("executing", "--task", par)
+    for sha in (k1, k2, k3):
         pm("executing", "--task", sha)
         pm("report", "--task", sha, "--title", "ok", "--text", "ok")
         pm("finished", "--task", sha)
+    pm("report", "--task", par, "--title", "rollup", "--text", "ok")
+    pm("finished", "--task", par)
 
     pm("replan", "--task", k2, "--no-cascade", "--cascade-down-parents")
 
@@ -1456,6 +1473,8 @@ def g44_superseded_child_is_terminal_for_finish_gate() -> None:
     kid = json.loads(pm("plan", "--queue", q, "--title", "K", "--text", "kid",
                         "--parent", par,
                         env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    # Claim par first (lifecycle binding for the subtree).
+    pm("executing", "--task", par)
     # Drive kid to done so we can replan-with-edit (which supersedes it).
     pm("executing", "--task", kid)
     pm("report", "--task", kid, "--title", "ok", "--text", "ok")
@@ -1464,9 +1483,8 @@ def g44_superseded_child_is_terminal_for_finish_gate() -> None:
     assert_eq(store.status_value(store.latest_status(kid)), "superseded",
               "G44 sanity: original kid is superseded after replan-with-text")
 
-    # Claim par + report (so finish has a TaskReport). With the clone
+    # par + report (so finish has a TaskReport). With the clone
     # still `new`, finish must refuse with exit 14.
-    pm("executing", "--task", par)
     pm("report", "--task", par, "--title", "rollup", "--text", "x")
     p = pm("finished", "--task", par, check=False)
     assert_eq(p.returncode, 14,
@@ -1500,9 +1518,11 @@ def g41_cascade_down_parents_two_level_chain() -> None:
     kid = json.loads(pm("plan", "--queue", q, "--title", "K", "--text", "child",
                         "--parent", p,
                         env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
-    # Drive bottom-up (parent gate enforces this anyway).
+    # Top-down claims (parent-claim gate); bottom-up close (finish gate).
+    pm("executing", "--task", gp)
+    pm("executing", "--task", p)
+    pm("executing", "--task", kid)
     for sha in (kid, p, gp):
-        pm("executing", "--task", sha)
         pm("report", "--task", sha, "--title", "ok", "--text", "ok")
         pm("finished", "--task", sha)
 
@@ -1537,29 +1557,33 @@ def g42_cascade_down_parents_no_parent_safe() -> None:
 
 
 def g43_cascade_down_parents_skips_inflight_parent() -> None:
-    """G43: an in-flight rollup parent (currently `working` or `new`)
-    is skipped — same policy as cascade-down for descendants. Avoids
-    yanking a status out from under an active worker."""
+    """G43: an in-flight rollup parent (currently `working`) is skipped
+    by cascade-down-parents — same policy as cascade-down for
+    descendants. Avoids yanking a status out from under an active
+    worker holding the parent claim."""
     q = fresh_queue("g43")
     par = json.loads(pm("plan", "--queue", q, "--title", "P", "--text", "parent",
                         env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
     kid = json.loads(pm("plan", "--queue", q, "--title", "K", "--text", "kid",
                         "--parent", par,
                         env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
-    # Drive kid to done; parent stays `new` (never claimed).
+    # Claim par (lifecycle binding, satisfies parent-claim gate for kid).
+    pm("executing", "--task", par)
+    # Drive kid to done; par stays `working` (in-flight rollup).
     pm("executing", "--task", kid)
     pm("report", "--task", kid, "--title", "ok", "--text", "ok")
     pm("finished", "--task", kid)
-    assert_eq(store.status_value(store.latest_status(par)), "new",
-              "G43 sanity: parent stays new")
+    assert_eq(store.status_value(store.latest_status(par)), "working",
+              "G43 sanity: parent in-flight (working)")
 
     out = json.loads(pm("replan", "--task", kid,
                         "--no-cascade", "--cascade-down-parents").stdout)
     rollups = out.get("rollup_parents") or []
     assert len(rollups) == 1, f"G43 expected 1 rollup entry, got {rollups!r}"
     assert rollups[0].get("skipped") is True, \
-        f"G43 expected the in-flight (`new`) parent skipped; got {rollups[0]!r}"
-    assert_eq(rollups[0].get("current"), "new", "G43 skipped parent current=new")
+        f"G43 expected the in-flight (`working`) parent skipped; got {rollups[0]!r}"
+    assert_eq(rollups[0].get("current"), "working",
+              "G43 skipped parent current=working")
 
 
 def g38_replan_cascade_down_skips_inflight() -> None:
@@ -1865,6 +1889,30 @@ def g63_top_level_task_unaffected_by_parent_gate() -> None:
               "G63 top-level task must be runnable immediately")
 
 
+def g64_executing_refuses_child_with_unclaimed_parent() -> None:
+    """G64: `pm executing --task <child>` is hard-gated on parent claim
+    too — exit 15 if the parent's status is still `new`. Catches the
+    direct-dispatch / build-task-body bypass where the worker has the
+    sha and skips `pm next`. Verified by planning_parent_gate.als#
+    ChildBlockedUntilParentClaimed (now enforced at claim-time)."""
+    q = fresh_queue("g64")
+    par = json.loads(pm("plan", "--queue", q, "--title", "P", "--text", "parent",
+                        env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    kid = json.loads(pm("plan", "--queue", q, "--title", "K", "--text", "kid",
+                        "--parent", par,
+                        env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    # Direct dispatch: skip `pm next`, claim child by sha.
+    p = pm("executing", "--task", kid, check=False)
+    assert_eq(p.returncode, 15,
+              f"G64 direct claim of child while parent `new` must exit 15; "
+              f"got {p.returncode}\nstderr: {p.stderr}")
+    # Claim parent first; child claim now succeeds.
+    pm("executing", "--task", par)
+    pm("executing", "--task", kid)
+    assert_eq(store.status_value(store.latest_status(kid)), "working",
+              "G64 child claim succeeds once parent is non-`new`")
+
+
 def g54_parent_chain_cycle_refused() -> None:
     """G54: NoCycle on parentTask. bulk_plan with a spec whose `parent`
     chain transitively contains the spec's own deterministic sha (slug)
@@ -1989,6 +2037,7 @@ ALL_FLOWS = {
     "G61": g61_bulk_plan_finalize_slug_collision_refused,
     "G62": g62_child_blocked_until_parent_claimed,
     "G63": g63_top_level_task_unaffected_by_parent_gate,
+    "G64": g64_executing_refuses_child_with_unclaimed_parent,
 }
 
 

@@ -12,6 +12,10 @@ Exit codes:
        rejected our append with 'head moved')
   10 — sticky-context refusal: task is sticky and PM_CONTEXT_ID either is
        unset or doesn't match the bound context of an ancestor/dep
+  15 — parent-claim refusal: this task has a parentTask in `new`. Claim
+       the parent first to bind the subtree's lifecycle. (Also enforced
+       at `pm next` / `pm pull` selection — this is the hard claim-time
+       gate that catches direct dispatch / build-task-body resume.)
 
 Race-safety: native `chain_predecessor` head-move check on the
 TaskStatus chain — see ``system-models/reports/planning-enforcement.md``.
@@ -76,6 +80,30 @@ def main() -> int:
 
     task = store.get_task(args.task)
     is_sticky = store.task_is_sticky(task)
+
+    # Parent-claim gate (also enforced at pm next / pm pull selection).
+    # The convention is "child can't start until parent's lifecycle has
+    # begun"; this hard gate makes it real regardless of how the worker
+    # arrived at the sha (direct dispatch, build-task-body, resume, etc.).
+    # Cross-queue parent treated as no parent (the gate is about
+    # co-queue lifecycle ownership). See planning_parent_gate.als.
+    parent_record = (task.get("links") or {}).get("parentTask") if task else None
+    if parent_record:
+        queue = ((task or {}).get("attributes") or {}).get("queue", "default")
+        for sibling in store.list_tasks(queue):
+            if sibling.get("record_sha256") == parent_record:
+                parent_text = sibling["text_sha256"]
+                parent_status = store.status_value(store.latest_status(parent_text))
+                if parent_status == "new":
+                    sys.stderr.write(
+                        f"refusing: task {args.task[:12]} has parent "
+                        f"{parent_text[:12]} still in `new` — claim the "
+                        f"parent first to bind the subtree's lifecycle. "
+                        f"See `skills/pm/plan/SKILL.md` \"Parents are "
+                        f"grouping nodes\".\n"
+                    )
+                    return 15
+                break
 
     if is_sticky:
         if not agent_context:
