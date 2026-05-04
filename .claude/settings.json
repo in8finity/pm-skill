@@ -14,6 +14,7 @@
       "Bash(pm extract-steps *)",
       "Bash(pm status *)",
       "Bash(pm status)",
+      "Bash(pm show *)",
       "Bash(pm dashboard *)",
       "Bash(pm dashboard)",
       "Bash(pm sweep *)",
@@ -22,6 +23,53 @@
       "mcp__hashharness__find_items",
       "mcp__hashharness__verify_chain",
       "mcp__hashharness__get_work_package"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/skills/pm/hooks/session_start.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "mcp__hashharness__create_item|mcp__hashharness__set_schema",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/skills/pm/hooks/no_direct_mcp_writes.sh",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Bash(pm finished *)",
+            "command": "$CLAUDE_PROJECT_DIR/skills/pm/hooks/skip_verifier_requires_note.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/skills/pm/hooks/stop_with_open_task.py",
+            "timeout": 15
+          }
+        ]
+      }
     ]
   }
 }
