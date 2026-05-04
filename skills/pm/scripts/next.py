@@ -88,10 +88,12 @@ def main() -> int:
                 return False
         return True
 
+    workdir_skipped = 0
     for t in tasks:
         sha = t["text_sha256"]
         bound = store.task_workdir(t)
         if bound is not None and bound != here:
+            workdir_skipped += 1
             continue
         if status_of(sha) != "new":
             continue
@@ -103,6 +105,17 @@ def main() -> int:
         print(json.dumps(t, indent=2))
         return 0
 
+    # Diagnostic: if we returned null but the queue had tasks scoped to
+    # a different workdir than the caller's, surface that on stderr so
+    # the worker doesn't think the queue is empty when it's just
+    # invisible. Fixes the "first worker thought queue was empty" foot-
+    # gun where PM_WORKDIR isn't set and tasks all have a workdir.
+    if workdir_skipped:
+        sys.stderr.write(
+            f"pm next: filtered {workdir_skipped} task(s) by workdir "
+            f"mismatch (caller workdir={here!r}); set PM_WORKDIR=... or "
+            f"run from the planner's cwd to see them\n"
+        )
     print("null")
     return 0
 

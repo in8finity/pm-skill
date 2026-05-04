@@ -34,7 +34,19 @@ import store
 
 
 def default_agent_id() -> str:
-    return os.environ.get("PM_AGENT_ID") or f"{socket.gethostname()}-{os.getpid()}"
+    """Agent identifier for the claim. Resolution order:
+        1. ``$PM_AGENT_ID`` (explicit override)
+        2. ``worker-<PM_CONTEXT_ID[:12]>`` if a context_id is set —
+           stable across subshells of the same session, so the
+           heartbeat that follows a claim from a fresh subshell still
+           owns the lease.
+        3. ``hostname-pid`` (legacy fallback for non-sticky one-shots)
+    """
+    if env := os.environ.get("PM_AGENT_ID"):
+        return env
+    if ctx := os.environ.get("PM_CONTEXT_ID"):
+        return f"worker-{ctx[:12]}"
+    return f"{socket.gethostname()}-{os.getpid()}"
 
 
 def main() -> int:

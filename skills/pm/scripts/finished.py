@@ -402,16 +402,19 @@ def main() -> int:
         sys.stderr.write(f"refusing: task {args.task[:12]} status is '{current}'\n")
         return 6
 
-    bound = store.status_context_id(latest_st)
-    if bound:
-        agent_context = args.context_id or os.environ.get("PM_CONTEXT_ID") or None
-        if agent_context != bound:
-            sys.stderr.write(
-                f"refusing: task {args.task[:12]} is sticky-bound to "
-                f"context {bound[:12]}; PM_CONTEXT_ID is "
-                f"'{(agent_context or '<unset>')[:12]}'\n"
-            )
-            return 10
+    # Full sticky-chain check (matches executing.py). The previous
+    # version only inspected the task's own latest context_id, which
+    # missed two cases: (a) a sticky parent's binding wasn't enforced
+    # for non-sticky children, and (b) after a reclaim clears the own
+    # binding, ANY agent could close the task. Use the same gate
+    # executing.py uses so all four state-mutating subcommands
+    # (executing/heartbeat/report/finished) fail identically.
+    agent_context = args.context_id or os.environ.get("PM_CONTEXT_ID") or None
+    try:
+        store.check_sticky_eligibility(args.task, agent_context)
+    except (store.StickyContextMismatch, store.StickyContextConflict) as e:
+        sys.stderr.write(f"refusing: {e}\n")
+        return 10
 
     report = store.latest_report(args.task)
     if report is None:

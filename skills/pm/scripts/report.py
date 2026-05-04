@@ -40,16 +40,17 @@ def main() -> int:
         sys.stderr.write("missing report body\n")
         return 2
 
-    bound = store.status_context_id(store.latest_status(args.task))
-    if bound:
-        agent_context = args.context_id or os.environ.get("PM_CONTEXT_ID") or None
-        if agent_context != bound:
-            sys.stderr.write(
-                f"refusing: task {args.task[:12]} is sticky-bound to "
-                f"context {bound[:12]}; PM_CONTEXT_ID is "
-                f"'{(agent_context or '<unset>')[:12]}'\n"
-            )
-            return 10
+    # Full sticky-chain check (matches executing.py). The previous
+    # version only inspected the task's own latest context_id, which
+    # missed two cases: (a) a sticky parent's binding wasn't enforced
+    # for non-sticky children, (b) after a reclaim clears the own
+    # binding, ANY agent could submit reports.
+    agent_context = args.context_id or os.environ.get("PM_CONTEXT_ID") or None
+    try:
+        store.check_sticky_eligibility(args.task, agent_context)
+    except (store.StickyContextMismatch, store.StickyContextConflict) as e:
+        sys.stderr.write(f"refusing: {e}\n")
+        return 10
 
     report = store.append_report(args.task, args.title, text)
     if not isinstance(report, dict) or report.get("type") != "TaskReport":

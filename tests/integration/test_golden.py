@@ -1257,6 +1257,62 @@ def g40_replan_cascade_down_parents() -> None:
               "G40 k3 (deps-descendant of k2) reset")
 
 
+def g47_finished_enforces_full_sticky_chain() -> None:
+    """G47: pm finished must use the full check_sticky_eligibility chain
+    walk (not just the task's own latest context_id). Setup: a sticky
+    parent claimed by ctx1, a NON-STICKY child planned under it that
+    inherits no own binding. The previous own-binding-only check missed
+    the parent's binding and let any agent close the child. With the
+    full check, ctx2 is refused (StickyContextMismatch on
+    'ancestor/dep'), exit 10."""
+    q = fresh_queue("g47")
+    ctx1 = pm("context-id").stdout.strip()
+    ctx2 = pm("context-id").stdout.strip()
+    env1 = {"PM_CONTEXT_ID": ctx1, "PM_WORKDIR": ""}
+    env2 = {"PM_CONTEXT_ID": ctx2, "PM_WORKDIR": ""}
+    par = json.loads(pm("plan", "--queue", q, "--title", "P",
+                        "--text", "sticky parent", "--sticky",
+                        env_extra=env1).stdout)["task"]["text_sha256"]
+    pm("executing", "--task", par, env_extra=env1)
+    # Child: NOT explicitly sticky in the spec, but inherits from parent
+    # via plan.py's sticky inheritance. Both bound to ctx1.
+    kid = json.loads(pm("plan", "--queue", q, "--title", "K",
+                        "--text", "child", "--parent", par,
+                        env_extra=env1).stdout)["task"]["text_sha256"]
+    pm("executing", "--task", kid, env_extra=env1)
+    pm("report", "--task", kid, "--title", "ok", "--text", "ok",
+       env_extra=env1)
+
+    # ctx2 attempt to finish the child — must be refused.
+    p = pm("finished", "--task", kid, env_extra=env2, check=False)
+    assert_eq(p.returncode, 10,
+              f"G47 ctx2 finished must be refused (parent-bound to ctx1); "
+              f"got {p.returncode}")
+
+
+def g48_heartbeat_enforces_sticky_chain() -> None:
+    """G48: pm heartbeat must enforce sticky-context (was missing
+    entirely). A worker holding a sticky claim under ctx1 — heartbeat
+    from ctx2 must be refused exit 10."""
+    q = fresh_queue("g48")
+    ctx1 = pm("context-id").stdout.strip()
+    ctx2 = pm("context-id").stdout.strip()
+    env1 = {"PM_CONTEXT_ID": ctx1, "PM_WORKDIR": ""}
+    env2 = {"PM_CONTEXT_ID": ctx2, "PM_WORKDIR": ""}
+    sha = json.loads(pm("plan", "--queue", q, "--title", "T",
+                        "--text", "sticky", "--sticky",
+                        env_extra=env1).stdout)["task"]["text_sha256"]
+    pm("executing", "--task", sha, env_extra=env1)
+
+    # Heartbeat from same context: ok.
+    pm("heartbeat", "--task", sha, env_extra=env1)
+    # Heartbeat from different context: must refuse exit 10.
+    p = pm("heartbeat", "--task", sha, env_extra=env2, check=False)
+    assert_eq(p.returncode, 10,
+              f"G48 ctx2 heartbeat on ctx1-bound task must refuse; "
+              f"got {p.returncode}")
+
+
 def g46_sticky_rebinding_after_reclaim() -> None:
     """G46: a sticky task claimed by ctx1, reclaimed, then claimed by
     ctx2 (different) — the binding REBINDS to ctx2; subsequent
@@ -1517,6 +1573,8 @@ ALL_FLOWS = {
     "G44": g44_superseded_child_is_terminal_for_parent_gate,
     "G45": g45_self_parent_refused,
     "G46s": g46_sticky_rebinding_after_reclaim,
+    "G47": g47_finished_enforces_full_sticky_chain,
+    "G48": g48_heartbeat_enforces_sticky_chain,
 }
 
 

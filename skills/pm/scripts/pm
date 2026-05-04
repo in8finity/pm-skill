@@ -19,6 +19,7 @@
 #   pm replan          [-- args for replan.py — restart task + upstream chain]
 #   pm context-id      [-- args for context_id.py — generate sticky-context UUID]
 #   pm dashboard       [-- args for dashboard.py — minimal HTTP dashboard]
+#   pm show            [-- args for show.py — print one task's full detail (text or JSON)]
 #   pm install         [-- args for install_hashharness.sh — install the MCP backend]
 #   pm extract-steps   [-- args for extract_skill_steps.sh — semantic step extraction with validation]
 #
@@ -55,15 +56,16 @@ case "${1:-}" in
   replan)     shift; exec "$DIR/replan.py" "$@" ;;
   context-id) shift; exec "$DIR/context_id.py" "$@" ;;
   dashboard)  shift; exec "$DIR/dashboard.py" "$@" ;;
+  show)       shift; exec "$DIR/show.py" "$@" ;;
   install)    shift; exec "$DIR/install_hashharness.sh" "$@" ;;
   extract-steps) shift; exec "$DIR/extract_skill_steps.sh" "$@" ;;
   ""|-h|--help)
-    sed -n '2,23p' "$0"
+    sed -n '2,24p' "$0"
     exit 0
     ;;
   *)
     echo "pm: unknown subcommand '$1'" >&2
-    sed -n '2,23p' "$0" >&2
+    sed -n '2,24p' "$0" >&2
     exit 64
     ;;
 esac
