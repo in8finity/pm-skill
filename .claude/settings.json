@@ -47,17 +47,6 @@
             "timeout": 5
           }
         ]
-      },
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "if": "Bash(pm finished *)",
-            "command": "$CLAUDE_PROJECT_DIR/skills/pm/hooks/skip_verifier_requires_note.sh",
-            "timeout": 5
-          }
-        ]
       }
     ],
     "Stop": [

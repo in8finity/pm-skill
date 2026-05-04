@@ -1260,6 +1260,43 @@ def g40_replan_cascade_down_parents() -> None:
               "G40 k3 (deps-descendant of k2) reset")
 
 
+def g50_skip_verifier_requires_note() -> None:
+    """G50: pm finished --skip-verifier without --note "<≥10 chars>"
+    exits 13. Audit chain records verifier_exit=-1 + the note text on
+    the closing status, so the WHY is preserved alongside the WHO.
+    Without the note, the bypass is refused at the CLI."""
+    q = fresh_queue("g50")
+    sha = json.loads(pm("plan", "--queue", q, "--title", "T",
+                        "--text", "x", "--verifier", "skill:simplify",
+                        env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    pm("executing", "--task", sha)
+    pm("report", "--task", sha, "--title", "r", "--text", "did stuff")
+
+    # No --note: refused exit 13.
+    p = pm("finished", "--task", sha, "--skip-verifier", check=False)
+    assert_eq(p.returncode, 13,
+              f"G50 --skip-verifier without --note must exit 13; got {p.returncode}")
+
+    # Empty --note: still refused.
+    p = pm("finished", "--task", sha, "--skip-verifier", "--note", "", check=False)
+    assert_eq(p.returncode, 13,
+              f"G50 --skip-verifier with empty --note must exit 13; got {p.returncode}")
+
+    # Too-short --note (3 chars): still refused.
+    p = pm("finished", "--task", sha, "--skip-verifier", "--note", "ack", check=False)
+    assert_eq(p.returncode, 13,
+              f"G50 --skip-verifier with 3-char --note must exit 13; got {p.returncode}")
+
+    # Long enough note: succeeds.
+    pm("finished", "--task", sha, "--skip-verifier",
+       "--note", "verifier flake; manually re-checked tests pass")
+    assert_eq(store.status_value(store.latest_status(sha)), "done",
+              "G50 --skip-verifier with valid --note must close task")
+    final_attrs = store.latest_status(sha).get("attributes") or {}
+    assert_eq(final_attrs.get("verifier_exit"), -1,
+              "G50 audit chain must record verifier_exit=-1")
+
+
 def g49_default_replan_no_cascades() -> None:
     """G49: bare `pm replan --task X` (no flags) defaults to NO cascade
     after the default flip. Previously cascade-up was the default —
@@ -1601,6 +1638,7 @@ ALL_FLOWS = {
     "G47": g47_finished_enforces_full_sticky_chain,
     "G48": g48_heartbeat_enforces_sticky_chain,
     "G49": g49_default_replan_no_cascades,
+    "G50": g50_skip_verifier_requires_note,
 }
 
 

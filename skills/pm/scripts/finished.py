@@ -28,6 +28,7 @@ Exit codes:
   7  no TaskReport on the task
   9  verifier failed (--rejected bypasses this; --skip-verifier overrides)
   10 sticky-context refusal: task is bound to a different PM_CONTEXT_ID
+  13 --skip-verifier without --note "<reason>" of >= 10 chars
 """
 from __future__ import annotations
 
@@ -391,10 +392,29 @@ def main() -> int:
     p.add_argument("--note", default="")
     p.add_argument("--verifier-timeout", type=int, default=DEFAULT_TIMEOUT)
     p.add_argument("--skip-verifier", action="store_true",
-                   help="DANGER: skip the verifier even if the task declares one")
+                   help="DANGER: skip the verifier even if the task declares one. "
+                        "Requires --note \"<reason>\" of at least 10 chars; "
+                        "the audit chain records verifier_exit=-1 + the note "
+                        "so a future auditor can see WHY this bypass fired.")
     p.add_argument("--context-id", default=None,
                    help="sticky context id (overrides $PM_CONTEXT_ID)")
     args = p.parse_args()
+
+    # --skip-verifier requires a non-trivial --note explaining the bypass.
+    # Records of this form are auditable (verifier_exit=-1 plus the note
+    # text on the closing TaskStatus); without the note the audit chain
+    # can show WHO bypassed but not WHY.
+    if args.skip_verifier:
+        note = (args.note or "").strip()
+        if len(note) < 10:
+            sys.stderr.write(
+                "refusing: --skip-verifier requires --note \"<reason>\" of "
+                "at least 10 chars explaining the bypass. The audit chain "
+                "records verifier_exit=-1 but a future auditor needs to "
+                "know WHY this specific task was bypassed.\n"
+                "  Example: --note \"verifier flake; manually re-checked tests pass\"\n"
+            )
+            return 13
 
     latest_st = store.latest_status(args.task)
     current = store.status_value(latest_st)
