@@ -16,6 +16,10 @@ Exit codes:
        the parent first to bind the subtree's lifecycle. (Also enforced
        at `pm next` / `pm pull` selection — this is the hard claim-time
        gate that catches direct dispatch / build-task-body resume.)
+  16 — task has no TaskStatus on the chain: either transient (the
+       genesis-status read raced the task creation) or persistent (the
+       task sha is wrong / the task doesn't exist). Distinct from exit
+       6 so callers can retry without conflating with status mismatch.
 
 Race-safety: native `chain_predecessor` head-move check on the
 TaskStatus chain — see ``system-models/reports/planning-enforcement.md``.
@@ -70,6 +74,22 @@ def main() -> int:
         args.agent = default_agent_id(args.context_id)
 
     latest_before = store.latest_status(args.task)
+    if latest_before is None:
+        # No TaskStatus on the chain yet. Two known causes:
+        #   (a) the task was just created and the genesis TaskStatus
+        #       hasn't been read back from the storage layer yet —
+        #       transient, retry will succeed.
+        #   (b) the task sha is wrong / the task doesn't exist —
+        #       persistent.
+        # Either way, current state is unactionable; surface as a
+        # distinct exit code so callers can distinguish from the
+        # status-not-`new` case (which is exit 6).
+        sys.stderr.write(
+            f"refusing: task {args.task[:12]} has no TaskStatus yet "
+            f"(genesis read race, or task sha wrong). Retry once; "
+            f"if it persists the task likely doesn't exist.\n"
+        )
+        return 16
     current = store.status_value(latest_before)
     if current != "new":
         sys.stderr.write(f"refusing: task {args.task[:12]} status is '{current}', expected 'new'\n")
