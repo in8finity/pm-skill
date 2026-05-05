@@ -253,7 +253,18 @@ def _unwrap_items(res):
 
 
 def fetch_state() -> dict:
-    """Return all tasks grouped by (workdir, queue), each with status + tree info."""
+    """Return all tasks grouped by (workdir, queue), each with status + tree info.
+
+    Performance: two MCP round trips total (one for Tasks, one for
+    TaskStatuses), regardless of how many tasks exist. The previous
+    implementation made N+1 round trips by calling `find_tip` per task;
+    that scaled linearly with queue size and made the dashboard feel
+    sluggish (~50ms/task over localhost). The DB query itself is
+    indexed on (work_package_id, type, created_at) so each `find_tip`
+    is fast individually — the cost was per-call HTTP round-trip
+    overhead, which bulk-fetch eliminates by computing the per-task
+    latest status in client memory.
+    """
     raw = mcp_client.tool("find_items", {"type": "Task", "limit": 10000})
     tasks = _unwrap_items(raw)
 
@@ -262,6 +273,21 @@ def fetch_state() -> dict:
         t["record_sha256"]: t["text_sha256"]
         for t in tasks
         if "record_sha256" in t and "text_sha256" in t
+    }
+
+    # Bulk-tips fetch: one MCP call returns the latest TaskStatus for
+    # every task's work_package_id. Server uses an index-aided
+    # `DISTINCT ON (work_package_id) ... ORDER BY created_at DESC`
+    # query, so the response carries only the N tips, not the full
+    # status history. See system-models/reports/proposal-hashharness-
+    # bulk-tips.md.
+    wp_ids = [store.task_wp(t["text_sha256"]) for t in tasks if t.get("text_sha256")]
+    bulk = mcp_client.tool(
+        "find_tips_bulk",
+        {"work_package_ids": wp_ids, "type": "TaskStatus"},
+    )
+    latest_by_wp: dict[str, dict] = {
+        wp: tip for wp, tip in (bulk.get("tips") or {}).items() if tip is not None
     }
 
     workdirs: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
@@ -276,7 +302,7 @@ def fetch_state() -> dict:
         workdir = attrs.get("workdir") or "<no-workdir>"
         queue = attrs.get("queue") or "default"
 
-        latest = store.latest_status(sha)
+        latest = latest_by_wp.get(store.task_wp(sha))
         status = store.status_value(latest) or "?"
 
         links = t.get("links") or {}
