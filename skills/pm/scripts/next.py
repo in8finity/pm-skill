@@ -39,9 +39,16 @@ def caller_workdir() -> str:
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--queue", default="default")
+    p.add_argument("--context-id", default=None,
+                   help="sticky context id (overrides $PM_CONTEXT_ID). When "
+                        "set, pm next pre-filters tasks the caller couldn't "
+                        "legally claim — skipping sticky tasks bound to a "
+                        "different context. Mirrors the executing/report/"
+                        "finished/heartbeat flag for CLI symmetry.")
     args = p.parse_args()
 
     here = caller_workdir()
+    agent_context = args.context_id or os.environ.get("PM_CONTEXT_ID") or None
 
     tasks = store.list_tasks(args.queue)
     tasks.sort(key=lambda t: t.get("created_at", ""))
@@ -94,6 +101,14 @@ def main() -> int:
         if not all(dep_done(d) for d in deps):
             continue
         if not parent_claimed(t):
+            continue
+        # Sticky pre-filter: skip a task we couldn't legally claim. Same
+        # check executing.py runs at claim-time; doing it here means we
+        # don't surface a task the worker would just bounce on with
+        # exit 10. Cheap because non-sticky tasks short-circuit.
+        try:
+            store.check_sticky_eligibility(sha, agent_context)
+        except (store.StickyContextMismatch, store.StickyContextConflict):
             continue
         print(json.dumps(t, indent=2))
         return 0
