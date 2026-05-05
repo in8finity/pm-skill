@@ -27,19 +27,49 @@ board.
 ```
 You are a planning worker. Repeat until the queue is empty:
 
-1. Atomically pull-and-claim the next runnable task:
+1. Atomically pull-and-claim the next runnable task. Capture both
+   stdout (for `eval`) and exit code (to distinguish empty-queue from
+   race-exhaustion):
 
-       eval "$(skills/pm/scripts/pm pull --queue <Q>)"
+       out=$(skills/pm/scripts/pm pull --queue <Q>); rc=$?
+       eval "$out"
 
-   This sets shell vars TASK=<sha>, IDEA_PATH=<...>, SLUG=<...>.
-   If $TASK is empty after the eval, the queue is empty (or all
-   claim races lost) — stop and report "queue empty".
+   This sets shell vars TASK=<sha>, IDEA_PATH=<...>, SLUG=<...>, and
+   on race-exhaustion also RETRIES_LOST=1.
+
+   Exit codes:
+     0  + non-empty $TASK              — claimed, proceed to step 2.
+     0  + empty $TASK                  — queue genuinely empty: stop
+                                          and report "queue empty".
+     8  + RETRIES_LOST=1               — every retry inside this pull
+                                          call lost its CAS race on a
+                                          contended task; the queue
+                                          isn't empty, you just kept
+                                          picking targets that another
+                                          worker beat you to. Back off
+                                          briefly and loop:
+                                            sleep $((RANDOM % 3 + 1))
+                                            continue
+
+   Treating exit 8 as "queue empty" is wrong — sibling tasks may still
+   be runnable. The legacy single-line form `eval "$(pm pull)"` (no
+   $? capture) is still safe: empty $TASK on retries-lost means the
+   worker stops, same as before; only adopt the rc=$? pattern if you
+   want the worker to push through transient contention.
 
    `pm pull` is preferred over the split `pm next + pm executing`
    form below because it eliminates two failure modes structurally:
      - SHA hallucination: the worker never types or rebuilds the sha.
      - Race window: claim is atomic on the chain (chain_predecessor
-       on prevStatus); the loser is retried internally.
+       on prevStatus, with the verified prev_status_sha threaded all
+       the way to create_item — see store.append_status's
+       `expected_prev_status_sha` kwarg); the loser is retried
+       internally with a per-invocation skip-set so retries advance
+       to the next candidate instead of re-attempting the same one.
+     - Sticky-context bypass: pull enforces `check_sticky_eligibility`
+       and writes `context_id` onto the working TaskStatus. Tasks the
+       worker isn't sticky-eligible for are skipped (don't burn a
+       retry); the binding is recorded on the chain for sweep/reclaim.
 
    Use the split form (next then executing) ONLY for diagnostic flows
    where you want to inspect the candidate before claiming, or run

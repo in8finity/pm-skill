@@ -426,19 +426,35 @@ def append_status(
     note: str = "",
     proof_report_sha: str | None = None,
     extra_attrs: dict[str, Any] | None = None,
+    expected_prev_status_sha: str | None = None,
 ) -> dict[str, Any]:
     """Append a TaskStatus chained off the current tip.
 
     ``task_sha`` is the Task's text_sha256 (canonical content-addressed
     identity). ``proof_report_sha`` is the proof-target's record_sha256
     (already-resolved link value — see hashharness 3a6cd18).
+
+    ``expected_prev_status_sha``: when supplied by callers that have
+    already read and validated the tip (e.g., the claim path checking
+    ``status == "new"``), use that record_sha256 directly as the
+    ``prevStatus`` link instead of doing a second ``latest_status``
+    read here. This closes a TOCTOU window where the caller's read
+    sees ``new`` but our internal re-read sees a concurrent claimant's
+    ``working`` — the server's chain_predecessor would then accept
+    the second write chained off ``working``, producing a duplicate
+    claim. With the caller's verified prev pinned, the CAS rejects
+    if the head has moved between read and write.
     """
     if status not in VALID_STATUSES:
         raise ValueError(f"invalid status: {status}; expected one of {VALID_STATUSES}")
-    prev = latest_status(task_sha)
+    if expected_prev_status_sha is not None:
+        prev_record_sha: str | None = expected_prev_status_sha
+    else:
+        prev = latest_status(task_sha)
+        prev_record_sha = prev["record_sha256"] if prev else None
     links: dict[str, Any] = {"task": _link_record_sha_for(task_sha)}
-    if prev:
-        links["prevStatus"] = prev["record_sha256"]
+    if prev_record_sha:
+        links["prevStatus"] = prev_record_sha
     if proof_report_sha:
         links["proof"] = proof_report_sha
     body = note or status
@@ -501,6 +517,7 @@ def append_claim(task_sha: str, agent: str, prev_status_sha: str,
             "working",
             note=f"claimed by {agent}",
             extra_attrs=extra,
+            expected_prev_status_sha=prev_status_sha,
         )
     except HeadMoved as e:
         raise ClaimLost(task_sha, prev_status_sha, mcp_error=e.mcp_error) from e
