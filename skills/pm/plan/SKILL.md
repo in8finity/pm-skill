@@ -142,6 +142,27 @@ soon as their deps are done (don't wait for children); they cannot
 (`pm finished` exit 14 otherwise). See
 `system-models/planning_parent_gate.als#ParentNotFinishedWhilePendingChild`.
 
+**Generating a conformant parent body.** Don't compose parent bodies
+by hand — call:
+
+```bash
+pm build-task-body --steps STEPS_JSON --mode parent \
+                   --prompt "<original problem statement>" \
+                   [--workdir <abs path>]
+```
+
+The helper emits a fixed lightweight body that lists the children
+(top-level steps from STEPS_JSON), embeds the `Role: parent` marker
+line, and carries the worker-facing instruction "do NOT replicate the
+children's work here". This is the marker `pm bulk-plan` lints for.
+
+**Lint enforcement** (`pm bulk-plan`): any spec referenced as
+`parent_slug` by some other spec in the same batch must contain a
+`Role: parent` line in its body. Bulk-plan refuses with **exit 12**
+otherwise, listing the offending parent slugs. Bypass with
+`--allow-heavy-parent` for legacy / exceptional cases (and accept
+that you've taken the convention off the table for those parents).
+
 ### Enqueueing many tasks at once — prefer `pm bulk-plan`
 
 When you are about to enqueue more than ~3 tasks in a row (e.g. one
@@ -282,6 +303,11 @@ existing slug-key Task) |
 | 4 | Slug already taken in this queue (either pre-check found it, or a
 concurrent `plan` claimed it first) |
 | 5 | `--parent` was provided but parent has no status yet |
+| 12 | (`pm bulk-plan` only) Parent-body lint failed: a spec is a
+parent of another spec in the batch but its body lacks the
+`Role: parent` marker line. Generate the body with
+`pm build-task-body --mode parent`, or pass
+`--allow-heavy-parent` to bulk-plan to bypass. |
 | 11 | Invalid graph at enqueue time. Sub-cases:
   - **`--depends-on` self-loop** (sha equals this task's prospective sha)
   - **`--depends-on` non-existent target** (sha doesn't resolve to a stored Task)

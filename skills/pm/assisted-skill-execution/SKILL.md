@@ -48,10 +48,13 @@ defaults flow through without dialogue.
   step. The default-pick + escalate policy applies to nested steps
   exactly as it does to top-level ones.
   **Parent task convention**: the parent step body stays lightweight
-  (grouping/contexting only); actual work happens in children; if
-  rollup/summary is needed, append a final child that depends on
-  every sibling. `pm finished` on the parent is gated until every
-  child is settled (exit 14 otherwise). See
+  (grouping/contexting only); build it with
+  `pm build-task-body --mode parent` (NOT `--mode assisted`). The
+  helper emits the `Role: parent` marker that `pm bulk-plan` lints
+  for — heavy parent bodies are refused with exit 12. Actual work
+  happens in children; if rollup/summary is needed, append a final
+  child that depends on every sibling. `pm finished` on the parent
+  is gated until every child is settled (exit 14 otherwise). See
   `skills/pm/plan/SKILL.md` "Parents are grouping nodes" and
   `skills/pm/guided-skill-execution/SKILL.md` for the bulk-plan
   shape.

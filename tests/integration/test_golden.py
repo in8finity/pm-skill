@@ -1142,7 +1142,7 @@ def g36_bulk_plan_chain_siblings() -> None:
     steps in array order."""
     q = fresh_queue("g36")
     spec = json.dumps([
-        {"slug": "par", "title": "P", "text": "parent"},
+        {"slug": "par", "title": "P", "text": "Role: parent\ngrouping node"},
         {"slug": "k1",  "title": "K1", "text": "first",  "parent_slug": "par"},
         {"slug": "k2",  "title": "K2", "text": "second", "parent_slug": "par"},
         {"slug": "k3",  "title": "K3", "text": "third",  "parent_slug": "par"},
@@ -1854,6 +1854,112 @@ def g61_bulk_plan_finalize_slug_collision_refused() -> None:
               f"stderr: {proc.stderr}")
 
 
+def g67_bulk_plan_parent_body_lint_refuses_heavy() -> None:
+    """G67: bulk-plan refuses with exit 12 when a spec is referenced as
+    `parent_slug` by another spec but its body lacks the `Role: parent`
+    marker line — enforces the "parents are grouping nodes" convention."""
+    q = fresh_queue("g67")
+    spec = json.dumps([
+        {"slug": "par", "title": "P",
+         "text": "Run formal-debugger end-to-end. Subtasks chain through every step."},
+        {"slug": "k1", "title": "K1", "text": "child", "parent_slug": "par"},
+    ])
+    proc = subprocess.run(
+        [PM, "bulk-plan", "--queue", q, "--input", "-"],
+        input=spec, text=True, capture_output=True,
+        env={**os.environ, "PM_WORKDIR": ""},
+    )
+    assert_eq(proc.returncode, 12,
+              f"G67 heavy parent must exit 12; got {proc.returncode}\n"
+              f"stderr: {proc.stderr}")
+    assert "Role: parent" in proc.stderr, \
+        f"G67 stderr must mention the missing marker; got: {proc.stderr!r}"
+    assert store.find_task_by_slug(q, "par") is None, \
+        "G67 lint must fire before any task is created"
+
+
+def g68_bulk_plan_parent_body_lint_accepts_marker() -> None:
+    """G68: a parent spec whose body contains a `Role: parent` line on
+    its own (anywhere in the body) passes the lint — bulk-plan creates
+    the parent + child as usual."""
+    q = fresh_queue("g68")
+    spec = json.dumps([
+        {"slug": "par", "title": "P",
+         "text": "Driving skill: foo\nRole: parent\nPrompt: investigate"},
+        {"slug": "k1", "title": "K1", "text": "child", "parent_slug": "par"},
+    ])
+    subprocess.run(
+        [PM, "bulk-plan", "--queue", q, "--input", "-"],
+        input=spec, text=True, capture_output=True, check=True,
+        env={**os.environ, "PM_WORKDIR": ""},
+    )
+    par = store.find_task_by_slug(q, "par")
+    k1 = store.find_task_by_slug(q, "k1")
+    assert par is not None and k1 is not None, \
+        "G68 conformant parent should be created with its child"
+
+
+def g69_bulk_plan_allow_heavy_parent_bypasses_lint() -> None:
+    """G69: --allow-heavy-parent bypasses the lint for legacy/exceptional
+    cases — a heavy parent body is accepted unchanged."""
+    q = fresh_queue("g69")
+    spec = json.dumps([
+        {"slug": "par", "title": "P",
+         "text": "heavy work-instruction body, no marker"},
+        {"slug": "k1", "title": "K1", "text": "child", "parent_slug": "par"},
+    ])
+    subprocess.run(
+        [PM, "bulk-plan", "--queue", q, "--input", "-",
+         "--allow-heavy-parent"],
+        input=spec, text=True, capture_output=True, check=True,
+        env={**os.environ, "PM_WORKDIR": ""},
+    )
+    assert store.find_task_by_slug(q, "par") is not None, \
+        "G69 --allow-heavy-parent must bypass the lint and create the parent"
+
+
+def g70_build_task_body_mode_parent_emits_marker() -> None:
+    """G70: `pm build-task-body --mode parent` emits a body with the
+    `Role: parent` marker line and lists the children derived from the
+    steps JSON — the body bulk-plan's lint accepts."""
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        json.dump({
+            "skill": "demo",
+            "skill_path": "/tmp/demo-skill.md",
+            "steps": [
+                {"n": "1", "title": "First step"},
+                {"n": "2", "title": "Second step"},
+            ],
+        }, fh)
+        steps_path = fh.name
+    try:
+        proc = subprocess.run(
+            [PM, "build-task-body", "--steps", steps_path,
+             "--mode", "parent", "--prompt", "drive demo skill"],
+            capture_output=True, text=True, check=True,
+        )
+    finally:
+        os.unlink(steps_path)
+    body = proc.stdout
+    assert any(line.strip() == "Role: parent" for line in body.splitlines()), \
+        f"G70 body must contain a `Role: parent` line; got: {body!r}"
+    assert "First step" in body and "Second step" in body, \
+        f"G70 body must list the children; got: {body!r}"
+    # And the body must satisfy the bulk-plan lint when used as a parent.
+    q = fresh_queue("g70")
+    spec = json.dumps([
+        {"slug": "par", "title": "P", "text": body},
+        {"slug": "k1", "title": "K1", "text": "child", "parent_slug": "par"},
+    ])
+    subprocess.run(
+        [PM, "bulk-plan", "--queue", q, "--input", "-"],
+        input=spec, text=True, capture_output=True, check=True,
+        env={**os.environ, "PM_WORKDIR": ""},
+    )
+    assert store.find_task_by_slug(q, "par") is not None, \
+        "G70 build-task-body --mode parent output must satisfy the lint"
+
+
 def g62_child_blocked_until_parent_claimed() -> None:
     """G62: under the parent-claim gate (since v0.5), a child is not
     returned by `pm next` until its parent's status is non-`new`.
@@ -2097,6 +2203,10 @@ ALL_FLOWS = {
     "G64": g64_executing_refuses_child_with_unclaimed_parent,
     "G65": g65_pm_next_prefers_context_affinity,
     "G66": g66_executing_distinguishes_missing_task_from_missing_status,
+    "G67": g67_bulk_plan_parent_body_lint_refuses_heavy,
+    "G68": g68_bulk_plan_parent_body_lint_accepts_marker,
+    "G69": g69_bulk_plan_allow_heavy_parent_bypasses_lint,
+    "G70": g70_build_task_body_mode_parent_emits_marker,
 }
 
 

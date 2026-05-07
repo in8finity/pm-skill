@@ -136,14 +136,22 @@ the prescribed step order.
 
 **Parent task convention** (see `skills/pm/plan/SKILL.md` "Parents are
 grouping nodes"): under `--depth ≥1`, the top-level `steps[i]` parent
-is a **grouping/contexting node**, not a work node. Its body should
-be lightweight (the orchestrator's prompt is fine; don't ask the
-worker to do meaningful work in the parent body). All actual work
-lives in children. If the step needs a rollup/summary, add it as a
-**final child** that depends on every sibling — the rollup belongs in
-a child task, not in the parent. The parent's `pm finished` is gated:
-it cannot close until every child is in {done, rejected, superseded}
-(exit 14 otherwise).
+is a **grouping/contexting node**, not a work node. Its body must be
+lightweight: build it with `pm build-task-body --mode parent` (NOT
+the per-step `--mode guided` form). The helper emits a body containing
+the `Role: parent` marker that `pm bulk-plan` lints for — heavy parent
+bodies are refused with exit 12. All actual work lives in children. If
+the step needs a rollup/summary, add it as a **final child** that
+depends on every sibling — the rollup belongs in a child task, not in
+the parent. The parent's `pm finished` is gated: it cannot close until
+every child is in {done, rejected, superseded} (exit 14 otherwise).
+
+```bash
+parent_body=$(pm build-task-body \
+  --steps /tmp/steps.json --mode parent \
+  --prompt "<original problem statement>" \
+  --workdir <workdir>)
+```
 
 The parent IS claimable as soon as its deps are done — that's the
 sticky-context binding event. A worker can claim the parent first,

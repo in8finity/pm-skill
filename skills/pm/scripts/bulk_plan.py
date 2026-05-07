@@ -80,6 +80,18 @@ def main() -> int:
              "(only used when --finalize-slug is set)",
     )
     p.add_argument(
+        "--allow-heavy-parent", action="store_true",
+        help="bypass the parent-body lint. By default, a spec referenced as "
+             "`parent_slug` by another spec in the batch must contain a "
+             "`Role: parent` line in its body (the marker emitted by "
+             "`pm build-task-body --mode parent`). The lint enforces the "
+             "convention that parent tasks are lightweight grouping/contexting "
+             "nodes, not work nodes — see `skills/pm/plan/SKILL.md` "
+             "\"Parents are grouping nodes\". Use this flag for legacy or "
+             "exceptional cases where you've reviewed and accepted a heavy "
+             "parent body.",
+    )
+    p.add_argument(
         "--finalize-text",
         default="Queue-level rollup. This task depends on every other "
                 "task in the batch and reaches `done` only after all of "
@@ -113,6 +125,43 @@ def main() -> int:
             "text": args.finalize_text,
             "depends_on_slugs": [s["slug"] for s in specs],
         })
+
+    # Parent-body lint: any spec referenced as `parent_slug` by some
+    # other spec in this batch is a parent in the parentTask sense.
+    # Per `skills/pm/plan/SKILL.md` "Parents are grouping nodes", a
+    # parent's body must be lightweight — not a work directive. Refuse
+    # parent specs whose body lacks the `Role: parent` marker (emitted
+    # by `pm build-task-body --mode parent`). Bypass with
+    # --allow-heavy-parent.
+    if not args.allow_heavy_parent:
+        parent_slugs = {s["parent_slug"] for s in specs if s.get("parent_slug")}
+        slug_to_spec = {s["slug"]: s for s in specs}
+        offenders = []
+        for ps in parent_slugs:
+            spec = slug_to_spec.get(ps)
+            if spec is None:
+                # parent_slug references a pre-existing task in the queue,
+                # not a spec in this batch — out of lint scope.
+                continue
+            body = spec.get("text") or ""
+            if not any(line.strip() == "Role: parent" for line in body.splitlines()):
+                offenders.append(ps)
+        if offenders:
+            sys.stderr.write(
+                "parent-body lint failed: the following specs are parents "
+                "(referenced as `parent_slug` by other specs) but their body "
+                "lacks the `Role: parent` marker line:\n"
+            )
+            for slug in offenders:
+                sys.stderr.write(f"  - {slug}\n")
+            sys.stderr.write(
+                "\nParent tasks must be lightweight grouping/contexting nodes — "
+                "see `skills/pm/plan/SKILL.md` \"Parents are grouping nodes\". "
+                "Use `pm build-task-body --mode parent --steps STEPS_JSON --prompt P` "
+                "to generate a conformant body, or pass --allow-heavy-parent to "
+                "bypass this check for legacy/exceptional cases.\n"
+            )
+            return 12
 
     # Auto-chain siblings: walk specs in order, remember the last slug
     # seen per parent_slug, and inject it into the next sibling's

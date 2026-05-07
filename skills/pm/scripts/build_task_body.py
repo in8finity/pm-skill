@@ -10,11 +10,28 @@ the body itself; it calls this helper, which builds a structured body
 from the extractor's JSON output + the verbatim source lines. No LLM
 shortcut is possible — the body is generated, not improvised.
 
+Two body shapes are supported:
+
+- `--mode {auto|assisted|guided}` (default): per-step worker body.
+  Requires `--step <n>`; emits the verbatim spec for that step.
+
+- `--mode parent`: lightweight grouping/contexting parent body.
+  Does NOT carry work instructions. Lists the children planned under
+  this parent and embeds the `Role: parent` marker that
+  `pm bulk-plan` lints for. Use this when planning a parent task
+  that wraps a per-step expansion (see `skills/pm/plan/SKILL.md`
+  "Parents are grouping nodes"). `--step` is ignored.
+
 Usage:
   build_task_body.py --steps STEPS_JSON \\
                      --step <n> \\
                      --prompt "<original problem statement>" \\
                      --mode <auto|assisted|guided> \\
+                     [--workdir <path>]
+
+  build_task_body.py --steps STEPS_JSON \\
+                     --mode parent \\
+                     --prompt "<original problem statement>" \\
                      [--workdir <path>]
 
   STEPS_JSON is the file produced by `pm extract-steps` with
@@ -81,15 +98,24 @@ def main() -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--steps", required=True,
                    help="path to JSON produced by `pm extract-steps`")
-    p.add_argument("--step", required=True,
-                   help="value of the step's `n` field, e.g. '9' or '9.formal-debugger.1'")
+    p.add_argument("--step", default=None,
+                   help="value of the step's `n` field, e.g. '9' or '9.formal-debugger.1'. "
+                        "Required for --mode {auto,assisted,guided}; ignored for --mode parent.")
     p.add_argument("--prompt", required=True,
                    help="original problem statement / objective the skill is being applied to")
     p.add_argument("--mode", default="auto",
-                   choices=("auto", "assisted", "guided"),
-                   help="execution mode the worker should use (default: auto)")
+                   choices=("auto", "assisted", "guided", "parent"),
+                   help="execution mode the worker should use (default: auto). "
+                        "Use 'parent' to emit a lightweight grouping-node body "
+                        "(no work instructions; lists children) — required by "
+                        "the `pm bulk-plan` parent-body lint.")
     p.add_argument("--workdir", default="",
                    help="absolute workdir for the task (default: inherit from caller)")
+    p.add_argument("--child-slug-prefix", default="step-",
+                   help="prefix used to derive each child's slug from its step `n` "
+                        "field when --mode=parent. Default 'step-' produces "
+                        "slugs like 'step-1', 'step-2'. Set to '' to use the raw "
+                        "step n.")
     args = p.parse_args()
 
     try:
@@ -103,6 +129,55 @@ def main() -> int:
     skill_path = data.get("skill_path") or ""
     if not skill_path:
         sys.stderr.write("STEPS_JSON missing skill_path; can't read source\n")
+        return 2
+
+    workdir_field = args.workdir or "(inherit)"
+
+    if args.mode == "parent":
+        top_steps = data.get("steps") or []
+        if not top_steps:
+            sys.stderr.write("STEPS_JSON has no top-level steps; can't list children\n")
+            return 6
+        prefix = args.child_slug_prefix
+        children_lines = []
+        for s in top_steps:
+            n = s.get("n") or "?"
+            title = s.get("title") or "?"
+            slug = f"{prefix}{n}"
+            children_lines.append(f"  - {slug}: {title}")
+        children_block = "\n".join(children_lines)
+
+        body = (
+            f"Driving skill: {skill_name}\n"
+            f"Driving skill path: {skill_path}\n"
+            f"Role: parent\n"
+            f"Mode: parent\n"
+            f"Workdir: {workdir_field}\n"
+            f"Prompt: {args.prompt}\n"
+            f"\n"
+            f"This task is a GROUPING / CONTEXTING node — do NOT execute the\n"
+            f"skill in this body. Per `skills/pm/plan/SKILL.md` \"Parents are\n"
+            f"grouping nodes\", the actual work lives in the children listed\n"
+            f"below. As the worker that claimed this parent:\n"
+            f"\n"
+            f"  - Hold the lifecycle / sticky-context lease.\n"
+            f"  - Do NOT replicate the children's work here. Each child runs\n"
+            f"    in its own claim and produces its own TaskReport.\n"
+            f"  - Run `pm finished` on this parent only after every child\n"
+            f"    reaches {{done, rejected, superseded}} (`pm finished`\n"
+            f"    refuses with exit 14 otherwise).\n"
+            f"  - If a queue-level rollup is needed, it should already be\n"
+            f"    planned as a final child that depends on every sibling —\n"
+            f"    not produced here.\n"
+            f"\n"
+            f"Children planned under this parent:\n"
+            f"{children_block}\n"
+        )
+        sys.stdout.write(body)
+        return 0
+
+    if not args.step:
+        sys.stderr.write("--step is required for --mode={auto,assisted,guided}\n")
         return 2
 
     step = find_step(data.get("steps") or [], args.step)
@@ -133,8 +208,6 @@ def main() -> int:
 
     subskills = step.get("subskills_invoked") or []
     subs_field = ", ".join(subskills) if subskills else "(none)"
-
-    workdir_field = args.workdir or "(inherit)"
 
     body = (
         f"Driving skill: {skill_name}\n"
