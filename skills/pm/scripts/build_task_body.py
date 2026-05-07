@@ -227,6 +227,53 @@ def main() -> int:
         f"-----------------------------------------------------------------\n"
     )
 
+    # Modes that allow iteration / mid-step subtasks get a mechanical
+    # footer listing the queue actions available to the worker — so the
+    # body itself teaches the contract instead of relying on the worker
+    # having read the orchestrator's SKILL.md. Auto mode is excluded:
+    # it rejects gates rather than iterating, so the toolkit doesn't
+    # apply.
+    if args.mode in ("guided", "assisted"):
+        body += (
+            f"\n"
+            f"----- Mid-step iteration toolkit (queue actions you may take) -----\n"
+            f"You are claiming this task as a worker. If the step's prescribed\n"
+            f"dialogue produces a sub-question, fails a gate, or otherwise\n"
+            f"requires iteration, prefer queue actions over inline improvisation.\n"
+            f"All commands take `--task <sha>`; THIS task's sha is the one you\n"
+            f"just claimed via `pm executing` / `pm pull`.\n"
+            f"\n"
+            f"  Open a sub-question subtask (defer/branch from this step):\n"
+            f"    pm plan --queue <queue> --parent <this-task-sha> \\\n"
+            f"            --slug <stable-id> --title \"...\" --text \"...\"\n"
+            f"    # Then `pm executing --task <subtask-sha>` to claim it.\n"
+            f"    # Resume the parent step after the subtask reaches done.\n"
+            f"\n"
+            f"  Checkpoint partial progress (without finishing):\n"
+            f"    pm report --task <this-task-sha> --title \"...\" --text \"...\"\n"
+            f"\n"
+            f"  Retry from the start of this step (gate failed, iteration needed):\n"
+            f"    pm replan --task <this-task-sha>   # appends fresh `new` status\n"
+            f"\n"
+            f"  Abandon an exploratory subtask (parent stays open):\n"
+            f"    pm cancel --task <subtask-sha> --reason \"...\"\n"
+            f"\n"
+            f"  Reject this step (precondition won't be supplied; do not skip silently):\n"
+            f"    pm finished --task <this-task-sha> --rejected\n"
+            f"    # Always pair with a `pm report` explaining why first.\n"
+            f"\n"
+            f"  Heartbeat (long-running step holding a sticky lease):\n"
+            f"    pm heartbeat --task <this-task-sha>\n"
+            f"\n"
+            f"Constraints:\n"
+            f"  - Subtasks inherit sticky+workdir from this parent automatically.\n"
+            f"  - This step cannot `pm finished` until every subtask you opened\n"
+            f"    is in {{done, rejected, superseded}} (exit 14 otherwise).\n"
+            f"  - Record every iteration / subtask in the final TaskReport so the\n"
+            f"    queue stays auditable.\n"
+            f"-------------------------------------------------------------------\n"
+        )
+
     sys.stdout.write(body)
     return 0
 

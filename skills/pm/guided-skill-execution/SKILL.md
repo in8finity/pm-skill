@@ -212,8 +212,15 @@ The helper guarantees the body contains: driving skill name + path,
 step number + title, anchor, **`Reference: <path>:<line>`** (so a
 worker can `Read(file_path=<path>, offset=<line>, limit=<N>)` directly
 to the prescribed step), `Step lines: <start>-<end>`, subskills
-invoked, mode, workdir, prompt, and the verbatim step spec from the
-SKILL.md between the anchor line and the next step's anchor.
+invoked, mode, workdir, prompt, the verbatim step spec from the
+SKILL.md between the anchor line and the next step's anchor, **and a
+`Mid-step iteration toolkit` footer** listing the queue actions the
+worker may take (`pm plan` for sub-question subtasks, `pm replan` for
+gate-failure retries, `pm cancel` for abandoned exploratory branches,
+`pm report` for partial-progress checkpoints, `pm finished --rejected`
+for unsupplied preconditions, `pm heartbeat` for long sticky leases).
+The footer is emitted only in `guided`/`assisted` modes — `auto`
+rejects gates rather than iterating, and `parent` carries no work.
 
 Workers learn this body shape once and scan it deterministically;
 they don't have to round-trip through the source SKILL.md to discover

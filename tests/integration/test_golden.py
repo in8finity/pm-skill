@@ -1960,6 +1960,73 @@ def g70_build_task_body_mode_parent_emits_marker() -> None:
         "G70 build-task-body --mode parent output must satisfy the lint"
 
 
+def g71_build_task_body_iteration_toolkit_per_mode() -> None:
+    """G71: per-step bodies include the "Mid-step iteration toolkit"
+    footer in guided + assisted modes (so workers learn pm plan/replan/
+    cancel/report contracts inline) and OMIT it in auto mode (auto
+    rejects gates rather than iterating). Parent mode is independent
+    (already covered by G70) and must not include the footer either."""
+    src = REPO / "tmp_g71_skill.md"
+    src.write_text("\n".join([
+        "# Demo skill",                               # line 1
+        "",                                           # 2
+        "## Step 1 — do something",                   # 3
+        "Do the thing.",                              # 4
+        "",                                           # 5
+        "## Step 2 — do another",                     # 6
+        "Do the other thing.",                        # 7
+    ]))
+    try:
+        steps_path = REPO / "tmp_g71_steps.json"
+        steps_path.write_text(json.dumps({
+            "skill": "demo",
+            "skill_path": str(src),
+            "steps": [
+                {"n": "1", "title": "do something", "anchor": "## Step 1 — do something",
+                 "line_number": 3, "body_lines": [3, 5]},
+                {"n": "2", "title": "do another", "anchor": "## Step 2 — do another",
+                 "line_number": 6, "body_lines": [6, 7]},
+            ],
+        }))
+        marker = "Mid-step iteration toolkit"
+        for mode in ("guided", "assisted"):
+            proc = subprocess.run(
+                [PM, "build-task-body", "--steps", str(steps_path),
+                 "--step", "1", "--mode", mode, "--prompt", "x"],
+                capture_output=True, text=True, check=True,
+            )
+            assert marker in proc.stdout, \
+                f"G71 {mode} body must contain the iteration toolkit footer"
+            for cmd in ("pm plan ", "pm replan ", "pm cancel ",
+                         "pm report ", "pm finished ", "pm heartbeat "):
+                assert cmd in proc.stdout, \
+                    f"G71 {mode} body missing toolkit command {cmd!r}"
+
+        # Auto mode: footer must be absent (auto rejects rather than iterates).
+        proc = subprocess.run(
+            [PM, "build-task-body", "--steps", str(steps_path),
+             "--step", "1", "--mode", "auto", "--prompt", "x"],
+            capture_output=True, text=True, check=True,
+        )
+        assert marker not in proc.stdout, \
+            "G71 auto-mode body must NOT contain the iteration toolkit footer"
+
+        # Parent mode: footer must be absent (no work happens in the parent).
+        proc = subprocess.run(
+            [PM, "build-task-body", "--steps", str(steps_path),
+             "--mode", "parent", "--prompt", "x"],
+            capture_output=True, text=True, check=True,
+        )
+        assert marker not in proc.stdout, \
+            "G71 parent-mode body must NOT contain the iteration toolkit footer"
+    finally:
+        for p in (src, REPO / "tmp_g71_steps.json"):
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass
+
+
 def g62_child_blocked_until_parent_claimed() -> None:
     """G62: under the parent-claim gate (since v0.5), a child is not
     returned by `pm next` until its parent's status is non-`new`.
@@ -2207,6 +2274,7 @@ ALL_FLOWS = {
     "G68": g68_bulk_plan_parent_body_lint_accepts_marker,
     "G69": g69_bulk_plan_allow_heavy_parent_bypasses_lint,
     "G70": g70_build_task_body_mode_parent_emits_marker,
+    "G71": g71_build_task_body_iteration_toolkit_per_mode,
 }
 
 
