@@ -283,16 +283,16 @@ caller-specified weekly reserve would be breached.
 
 ### Rate-limit source
 
-The same `rate_limits.five_hour` / `seven_day` numbers the user sees on
-their status bar — they're produced by the Claude Code harness and
-**only** piped into the statusline hook's stdin (no other local file or
-env var exposes them). To make those numbers readable out-of-band, the
-skill ships its own capture hook:
+Under Claude, `pm limits` reads the same `rate_limits.five_hour` /
+`seven_day` numbers the user sees on their status bar. They're produced
+by the Claude Code harness and **only** piped into the statusline hook's
+stdin (no other local file or env var exposes them). To make those
+numbers readable out-of-band, the skill ships its own capture hook:
 
     skills/pm/hooks/statusline_capture.sh
 
-It snapshots the harness JSON to `$CLAUDE_CONFIG_DIR/rate-limits.json`
-(default `~/.claude/rate-limits.json`) on every render, then either
+It snapshots the harness JSON to `$CLAUDE_CONFIG_DIR/pm-rate-limits.json`
+(default `~/.claude/pm-rate-limits.json`) on every render, then either
 delegates rendering to the user's prior statusline (set via
 `PM_UPSTREAM_STATUSLINE=/path/to/your/statusline.sh`) or emits a
 minimal one-line bar of its own. The skill never edits the user's
@@ -320,8 +320,12 @@ Chained form (keep your existing render, just add capture):
 }
 ```
 
-If the user opts out (never installs the hook), `pm limits` returns
-exit 1 (`unknown`) and the controller falls back to single-shot
+Under Codex, no hook is needed: `pm limits` reads the freshest
+`token_count` event from the current `~/.codex/sessions/*.jsonl` file
+(preferring the session named by `CODEX_THREAD_ID` when present).
+
+If the user opts out of the Claude hook, `pm limits` returns exit 1
+(`unknown`) there and the controller falls back to single-shot
 behavior — i.e. `--running` degrades gracefully rather than erroring.
 
 `pm limits` parses that cache and emits a decision:

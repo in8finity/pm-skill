@@ -38,8 +38,8 @@ input=$(cat)
 
 # Atomic cache write — readers must never see a torn file.
 cache_dir=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
-cache_path="$cache_dir/rate-limits.json"
-tmp="$cache_dir/.rate-limits.json.tmp.$$"
+cache_path="$cache_dir/pm-rate-limits.json"
+tmp="$cache_dir/.pm-rate-limits.json.tmp.$$"
 if printf '%s' "$input" > "$tmp" 2>/dev/null; then
   mv "$tmp" "$cache_path" 2>/dev/null || rm -f "$tmp"
 fi

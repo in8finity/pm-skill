@@ -111,6 +111,20 @@ pm owned --json
 pm owned --queue default
 ```
 
+### 4. Rate-limit awareness works without Claude hooks
+
+`pm limits` can read Codex's own rate-limit telemetry directly from the
+current session log in `~/.codex/sessions/*.jsonl`.
+
+- If `CODEX_THREAD_ID` is set, it prefers that thread's session file.
+- Otherwise it falls back to the freshest Codex session log.
+- `pm limits --cache-path /path/to/session.jsonl` forces a specific
+  Codex session file.
+
+This means `pm execute --running` can make the same `ok` / `wait` /
+`stop` decisions under Codex without installing Claude's statusline
+capture hook.
+
 ## Minimal rules
 
 This repo now ships a narrow rule file at `.codex/rules/pm.rules` that
