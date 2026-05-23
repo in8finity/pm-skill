@@ -14,6 +14,17 @@ description: >
 
 - `--agents N` — number of parallel workers (required)
 - `--queue Q` — board to drain (default `default`)
+- `--running` — stay alive across rate-limit windows: keep topping the
+  queue up to `N` workers, sleep through hourly caps via `ScheduleWakeup`,
+  and stop cleanly when the weekly reserve is breached. Without this
+  flag, the orchestrator spawns one batch of `N` workers, waits, and
+  exits — the legacy single-shot behavior.
+- `--reserve-weekly PCT` — used with `--running` only. Leave at least
+  this percent of the seven-day token budget untouched. Default `20`
+  (i.e. stop spawning once weekly usage crosses 80%). Set `0` to drain
+  the bucket.
+- `--max-five-hour PCT` — used with `--running` only. Treat the hourly
+  bucket as full at this percent and wait until reset. Default `95`.
 
 ## Procedure (driven by the host agent, not a single script)
 
@@ -252,3 +263,177 @@ A "dry-run permission check" helper would catch this in 1 second; in
 the meantime, when a worker dies on the first `pm next` and the error
 mentions "Permission to use Bash has been denied", check the allowlist
 shape against the actual command form before assuming an env bug.
+
+## Running mode (`--running`)
+
+Single-shot mode spawns one batch of `N` workers, waits, and returns.
+That's fine for short queues, but for long runs it hits two problems:
+
+1. **Hourly cap.** When Claude Code's five-hour bucket fills,
+   workers start failing mid-task with rate-limit errors. The orchestrator
+   reports "done", the queue is half-drained, and the user has to come back
+   later to resume manually.
+2. **Weekly burn.** With no awareness of the seven-day bucket, an
+   ambitious queue can consume the user's entire weekly allotment, leaving
+   nothing for unrelated work.
+
+`--running` solves both by turning the orchestrator into a long-lived
+controller that sleeps through hourly caps and exits cleanly when a
+caller-specified weekly reserve would be breached.
+
+### Rate-limit source
+
+The same `rate_limits.five_hour` / `seven_day` numbers the user sees on
+their status bar — they're produced by the Claude Code harness and
+**only** piped into the statusline hook's stdin (no other local file or
+env var exposes them). To make those numbers readable out-of-band, the
+skill ships its own capture hook:
+
+    skills/pm/hooks/statusline_capture.sh
+
+It snapshots the harness JSON to `$CLAUDE_CONFIG_DIR/rate-limits.json`
+(default `~/.claude/rate-limits.json`) on every render, then either
+delegates rendering to the user's prior statusline (set via
+`PM_UPSTREAM_STATUSLINE=/path/to/your/statusline.sh`) or emits a
+minimal one-line bar of its own. The skill never edits the user's
+existing statusline file — installation is a one-line change to
+`.claude/settings.json`:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "$CLAUDE_PROJECT_DIR/skills/pm/hooks/statusline_capture.sh"
+  }
+}
+```
+
+Chained form (keep your existing render, just add capture):
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "PM_UPSTREAM_STATUSLINE=/Users/me/.claude/statusline-command.sh \\
+                $CLAUDE_PROJECT_DIR/skills/pm/hooks/statusline_capture.sh"
+  }
+}
+```
+
+If the user opts out (never installs the hook), `pm limits` returns
+exit 1 (`unknown`) and the controller falls back to single-shot
+behavior — i.e. `--running` degrades gracefully rather than erroring.
+
+`pm limits` parses that cache and emits a decision:
+
+```
+$ pm limits --json --reserve-weekly 20 --max-five-hour 95
+```
+
+Exit codes (so the orchestrator can branch without parsing JSON):
+
+| code | status    | what it means                                       |
+|------|-----------|-----------------------------------------------------|
+| 0    | `ok`      | under all caps — safe to spawn                      |
+| 1    | `unknown` | cache missing / stale / malformed — caller decides  |
+| 2    | `stop`    | seven-day reserve breached — stop the run           |
+| 3    | `wait`    | five-hour cap hit — sleep `wait_seconds`            |
+
+If the orchestrator sees `unknown`, the safest call is to proceed with
+one batch and re-check after; the cache becomes fresh again on the very
+next statusline render (so within seconds of the next tool call).
+
+### Controller loop (orchestrator behavior)
+
+This is the `--running` analog of the one-shot procedure above. It is
+intended to be driven by the host agent (you) across multiple turns,
+with `ScheduleWakeup` carrying the loop across hourly waits without
+burning context on a `sleep`. Use the `loop` skill's dynamic mode
+(`<<autonomous-loop-dynamic>>`) or invoke `pm:execute --running` under
+`/loop pm:execute --running --agents N ...` so the wake-ups are
+re-entries into this same procedure.
+
+Each iteration:
+
+1. **Check limits.**
+
+       OUT=$(skills/pm/scripts/pm limits --json \
+             --reserve-weekly <PCT> --max-five-hour <PCT>); rc=$?
+
+   Branch on `rc`:
+     - `2` (stop): the weekly reserve is breached. Reclaim any tasks the
+       previous batch is still holding (so the next runner — possibly
+       tomorrow — picks them up cleanly), summarize what was completed,
+       and exit the loop. Do **not** schedule another wake-up.
+     - `3` (wait): the hourly bucket is full. Reclaim in-flight tasks
+       (the per-task answer to "what should happen to running work" —
+       see step 3 below), then `ScheduleWakeup` for `wait_seconds`
+       (clamped to `[60, 3600]` by the runtime — for waits longer than
+       an hour, the controller will simply re-check, see `wait` again,
+       and reschedule). Use the same `--running` prompt verbatim so
+       the next firing re-enters this procedure.
+     - `1` (unknown): proceed but treat with caution. If two consecutive
+       iterations report `unknown`, surface to the user — the statusline
+       hook may not be installed.
+     - `0` (ok): continue to step 2.
+
+2. **Census in-flight workers.** Count tasks the previous batch is
+   still working on, so this iteration only tops up the deficit
+   instead of always launching `N`:
+
+       ALIVE=$(skills/pm/scripts/pm status --queue <Q> --json \
+               | jq '[.tasks[] | select(.current_status=="working")] | length')
+       NEED=$(( N - ALIVE ))
+
+   If `NEED <= 0`, every slot is full. `ScheduleWakeup` for ~5 minutes
+   (270s — stays inside the prompt-cache TTL) and re-check.
+
+3. **Spawn `NEED` workers** with the canonical worker prompt above.
+   Single message, parallel `Agent` calls.
+
+4. **Reclaim policy on limit-hit (step 1 wait/stop branches).** When
+   the controller is about to sleep through a five-hour reset, its
+   already-running workers will almost certainly fail mid-task. Don't
+   leave their claims dangling for `pm sweep` to find later — actively
+   reclaim them:
+
+       skills/pm/scripts/pm owned --queue <Q> --json \
+         | jq -r '.[].text_sha256' \
+         | while read sha; do
+             skills/pm/scripts/pm reclaim --task "$sha" \
+               --reason "five-hour cap hit; resuming after $(date -r $RESET)"
+           done
+
+   This re-queues them as `new` so a fresh worker on the next iteration
+   picks them up from the top. The original worker, if still alive,
+   will lose its CAS on the next chain write and exit cleanly.
+
+5. **Wait for this batch's workers to finish, then loop.** When you
+   exit the loop body, decide between `ScheduleWakeup(short)` (queue
+   probably has more work, just want to give workers time to make
+   progress) and `ScheduleWakeup(long)` (waiting on a five-hour
+   reset). The `wait_seconds` from `pm limits` is the right value for
+   the long case; for the short case, prefer 270s to stay in the
+   prompt cache.
+
+### Stop conditions
+
+The controller exits the loop (no further wake-ups) when ANY of:
+
+- `pm limits` returns exit 2 (weekly reserve breached).
+- `pm next --queue <Q>` returns `null` AND no working tasks remain in
+  the census — the queue is genuinely drained.
+- The user interrupts.
+
+On stop, summarize: tasks done this run, tasks rejected, tasks left
+(blocked-on-deps or zero), how much of the weekly budget was consumed,
+and whether the stop was budget-driven or queue-empty.
+
+### Why ScheduleWakeup, not Bash sleep
+
+Hourly waits can be 30–60 minutes. A `sleep` in Bash keeps the session
+pinned and burns the prompt cache on re-entry. `ScheduleWakeup` lets
+the conversation go idle; the harness re-enters you when the timer
+fires, and the user can interrupt at any point with a normal message.
+For waits under ~270s, the prompt cache stays warm; for longer waits,
+the one cache miss is amortized against tens of minutes of idle.
