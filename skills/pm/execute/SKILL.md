@@ -197,6 +197,55 @@ Workers stop when `pm next` returns `null`. The orchestrator (you) waits
 for all `N` agents to complete and then summarizes: tasks done, tasks
 rejected, tasks left (should be zero or blocked-on-deps).
 
+### Sequential fallback (sub-agent context, no fan-out primitive)
+
+The "parent fans out via `pm-execute`" pattern only works when the
+caller has access to the platform's worker-spawning primitive. In
+**Claude Code**, the `Agent` tool is **orchestrator-only**: sub-agents
+spawned via `Agent` inherit a tools subset that excludes `Agent`
+itself. A sub-agent that claims a parent task and then tries to drive
+`pm-execute --agents N` to drain a subqueue cannot spawn the workers.
+The same constraint shows up in any environment whose worker-delegation
+primitive is gated to top-level sessions.
+
+When the caller lacks the fan-out primitive, fall back to **the worker
+becoming its own (sequential) executor** — single-threaded but
+correct:
+
+```
+while true; do
+  out=$(skills/pm/scripts/pm pull --queue <SUBQUEUE> \
+        --context-id $PM_CONTEXT_ID --json)
+  [[ "$out" == "null" || -z "$out" ]] && break
+  TASK=$(printf '%s' "$out" | jq -r .task)
+  # ...do the work for $TASK, then:
+  skills/pm/scripts/pm report   --task "$TASK" --title "..." --text -
+  skills/pm/scripts/pm finished --task "$TASK"
+done
+```
+
+Detection rule: if the parent task's body says "fan out to subqueue Q
+via pm-execute" but the current session is a sub-agent with no `Agent`
+tool (or an equivalent constraint elsewhere), switch to the loop above
+*without* trying to spawn — the spawn call will silently no-op or
+error in a way the orchestrator can't easily catch.
+
+Implications worth flagging in the parent task's body or report:
+
+- Sequential drain is slower (no parallelism inside the subqueue). For
+  small subqueues (≤ ~5 children) this is fine; for large ones,
+  consider planning the parent so its claim happens at the
+  orchestrator level instead, e.g. by leaving the parent unclaimed and
+  letting the top-level `pm-execute` pick it up.
+- A long sequential drain can hit rate-limit windows mid-loop. Use
+  `pm limits --json` checks between iterations the same way
+  `--running` mode does at the orchestrator level.
+- Heartbeating remains correct (the worker keeps holding the parent's
+  claim while iterating children), but the parent's `working` status
+  stays open for the entire subqueue drain — surface progress via
+  intermediate `pm report` calls so a supervisor can audit without
+  reading every child task.
+
 ### Claude permission allowlist gotchas (sub-agent invocation)
 
 This section is Claude-specific. Codex workers do not use Claude's
