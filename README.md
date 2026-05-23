@@ -79,14 +79,23 @@ For controlled cancellation, `pm cancel` terminates a task and optionally cascad
 
 ## Quick start
 
-0. **First time only — install hashharness.** Bundled installer creates an isolated venv, generates a launcher, writes a source-able `env` file:
+0. **Codex only — vendor the skill bundle into `~/.codex/skills/`.**
+   This preserves the bundle's shared relative paths and generates flat
+   `pm-*` alias skills for Codex builds that do not discover nested
+   subskills reliably.
+   ```bash
+   skills/pm/scripts/install_codex_skill.sh
+   ```
+   Then restart Codex so it rescans `~/.codex/skills/`.
+
+1. **First time only — install hashharness.** Bundled installer creates an isolated venv, generates a launcher, writes a source-able `env` file:
    ```bash
    skills/pm/scripts/pm install --to-home --yes      # → ~/.hashharness/
    # alternatives: --to-codex, --to-claude, --to-project, --where /custom/path
    ```
    Idempotent — re-running on an existing install reports the location and exits 0.
 
-1. **Start the MCP server.** The launcher already wires the env vars:
+2. **Start the MCP server.** The launcher already wires the env vars:
    ```bash
    ~/.hashharness/launch.sh &
    source ~/.hashharness/env                 # exports HASHHARNESS_MCP_URL
@@ -99,18 +108,23 @@ For controlled cancellation, `pm cancel` terminates a task and optionally cascad
    python -m hashharness.mcp_server
    ```
 
-2. **Register the planning schema** (once per data dir):
+3. **Register the planning schema** (once per data dir):
    ```bash
    skills/pm/scripts/pm setup
    ```
 
-3. **Launch your agent session**:
+4. **Run the smoke test**:
+   ```bash
+   skills/pm/scripts/pm smoke-test
+   ```
+
+5. **Launch your agent session**:
    ```bash
    skills/pm/scripts/codex_pm.sh                      # Codex with pm env preloaded
    ```
    Claude users can keep using the hook-based `.claude/settings.json` setup.
 
-4. **Drive the worker loop** — through the `pm-*` skills, or directly:
+6. **Drive the worker loop** — through the `pm-*` skills, or directly:
    ```bash
    pm plan      --title "Build X" --text "Detailed description..."
    pm next                          # pull next runnable

@@ -24,8 +24,10 @@
 #   pm show            [-- args for show.py — print one task's full detail (text or JSON)]
 #   pm build-task-body [-- args for build_task_body.py — assemble a structured task body for one extracted step]
 #   pm install         [-- args for install_hashharness.sh — install the MCP backend]
+#   pm install-codex-skill [-- args for install_codex_skill.sh — vendor the pm skill bundle into ~/.codex/skills]
 #   pm extract-steps   [-- args for extract_skill_steps.sh — semantic step extraction with validation]
 #   pm limits          [-- args for limits.py — read rate-limit cache, decide spawn/wait/stop]
+#   pm smoke-test      [-- args for smoke_test.sh — minimal end-to-end backend sanity check]
 #
 # Any further args are forwarded verbatim to the underlying script. The
 # scripts themselves use stable Python imports relative to this dir, so
@@ -65,15 +67,17 @@ case "${1:-}" in
   show)       shift; exec "$DIR/show.py" "$@" ;;
   build-task-body) shift; exec "$DIR/build_task_body.py" "$@" ;;
   install)    shift; exec "$DIR/install_hashharness.sh" "$@" ;;
+  install-codex-skill) shift; exec "$DIR/install_codex_skill.sh" "$@" ;;
   extract-steps) shift; exec "$DIR/extract_skill_steps.sh" "$@" ;;
   limits)     shift; exec "$DIR/limits.py" "$@" ;;
+  smoke-test) shift; exec "$DIR/smoke_test.sh" "$@" ;;
   ""|-h|--help)
-    sed -n '2,25p' "$0"
+    sed -n '2,30p' "$0"
     exit 0
     ;;
   *)
     echo "pm: unknown subcommand '$1'" >&2
-    sed -n '2,25p' "$0" >&2
+    sed -n '2,30p' "$0" >&2
     exit 64
     ;;
 esac

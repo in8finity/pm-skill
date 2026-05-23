@@ -18,6 +18,10 @@ description: >
 
 ## When to use
 
+- **Codex first-time setup** — if the `pm` skill bundle itself is not
+  installed under `~/.codex/skills/pm` yet, do that first with
+  `../scripts/install_codex_skill.sh`, restart Codex, then come back to
+  this backend installer.
 - **Fresh workstation** — pm needs hashharness running and reachable
   via `$HASHHARNESS_MCP_URL`. This skill is the easy path from "git
   clone of hashharness-pm" to "first `pm plan` works".

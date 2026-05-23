@@ -13,10 +13,31 @@ substitute mechanisms are different.
 
 ## Recommended Codex workflow
 
-### 1. Launch Codex through the wrapper
+### 1. Install the pm skill bundle into Codex
+
+From a checkout of `hashharness-pm`, run:
 
 ```bash
-skills/pm/scripts/codex_pm.sh
+skills/pm/scripts/install_codex_skill.sh
+```
+
+What it does:
+
+- vendors the whole `skills/pm/` tree into `~/.codex/skills/pm`
+- preserves the bundle's shared relative paths (`scripts/`, `hooks/`,
+  `skill-shared/`)
+- generates flat alias skills such as `pm-plan`, `pm-next`,
+  `pm-executing`, etc., for Codex builds that do not discover nested
+  subskills under `pm/`
+- prints the exact follow-up commands for backend install, schema
+  setup, and smoke test
+
+After install, restart Codex so it rescans `~/.codex/skills/`.
+
+### 2. Launch Codex through the wrapper
+
+```bash
+~/.codex/skills/pm/scripts/codex_pm.sh
 ```
 
 What it does:
@@ -32,10 +53,10 @@ What it does:
 Sanity check:
 
 ```bash
-skills/pm/scripts/codex_pm.sh --check
+~/.codex/skills/pm/scripts/codex_pm.sh --check
 ```
 
-### 2. Keep direct hashharness writes behind approval
+### 3. Keep direct hashharness writes behind approval
 
 In Codex, the closest guard to Claude's `PreToolUse` hook is MCP-tool
 approval policy in `~/.codex/config.toml`.
@@ -79,7 +100,7 @@ so Codex cannot cleanly say "allow `create_item` for other item types
 but deny it for `Task` / `TaskStatus` / `TaskReport` / `TaskHeartbeat`"
 the way the Claude hook can.
 
-### 3. Check for dangling owned tasks before you stop
+### 4. Check for dangling owned tasks before you stop
 
 Run:
 
@@ -94,7 +115,7 @@ the session.
 The narrow wrapper is:
 
 ```bash
-skills/pm/scripts/pm_owned_check.sh
+~/.codex/skills/pm/scripts/pm_owned_check.sh
 ```
 
 If you prefer to use the underlying command directly:
@@ -111,7 +132,7 @@ pm owned --json
 pm owned --queue default
 ```
 
-### 4. Rate-limit awareness works without Claude hooks
+### 5. Rate-limit awareness works without Claude hooks
 
 `pm limits` can read Codex's own rate-limit telemetry directly from the
 current session log in `~/.codex/sessions/*.jsonl`.
