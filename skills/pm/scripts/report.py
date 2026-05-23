@@ -2,7 +2,15 @@
 """Append a TaskReport (proof of work) to a task. Reports are chained.
 
 Usage:
-  report.py --task SHA --title T (--text BODY | --text-file PATH)
+  report.py --task SHA --title T (--text BODY | --text-file PATH | --text -)
+
+  ``--text -`` reads the report body from stdin verbatim. Use this in
+  sandboxes where writing a temp file is awkward and where inline
+  ``--text "...\\n..."`` would lose newlines (shell double-quotes do
+  not interpret ``\\n``). Pipe a heredoc or another command's stdout
+  directly:
+
+      printf '%s' "$body" | pm report --task $T --title T --text -
 
 Exit codes:
   0  — report appended
@@ -33,9 +41,14 @@ def main() -> int:
     if args.text and args.text_file:
         sys.stderr.write("provide --text or --text-file, not both\n")
         return 2
-    text = args.text if args.text is not None else (
-        Path(args.text_file).read_text() if args.text_file else None
-    )
+    if args.text == "-":
+        text = sys.stdin.read()
+    elif args.text is not None:
+        text = args.text
+    elif args.text_file:
+        text = Path(args.text_file).read_text()
+    else:
+        text = None
     if not text:
         sys.stderr.write("missing report body\n")
         return 2

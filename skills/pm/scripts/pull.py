@@ -3,6 +3,7 @@
 
 Usage:
   pull.py [--queue Q] [--max-retries N] [--regex P] [--context-id ID]
+          [--agent ID] [--json]
 
 Behavior:
   1. Call next() to get a runnable task.
@@ -28,14 +29,27 @@ Behavior:
         IDEA_PATH=<extracted from task.text via regex; empty if no match>
         SLUG=<task.attributes.slug>
      Caller in bash: ``eval "$(pm pull)"`` and then check ``[ -n "$TASK" ]``.
-  5. On queue-empty: exit 0 with NO output (TASK ends up empty).
-  6. On all races lost: exit 8 with stdout line ``RETRIES_LOST=1`` and a
-     stderr note. The non-zero exit lets a worker that captures ``$?``
-     distinguish "queue genuinely empty, stop" (exit 0, no TASK) from
-     "still contended, back off and retry" (exit 8, RETRIES_LOST set).
+     With ``--json``, prints a single JSON object instead — friendlier
+     to restricted sandboxes that block ``eval`` and ``$(...)`` chains:
+        {"task": "...", "idea_path": "...", "slug": "...", "agent": "..."}
+     On queue-empty with ``--json``, prints ``null``.
+  5. On queue-empty (no --json): exit 0 with NO output (TASK ends up empty).
+  6. On all races lost: exit 8 with stdout line ``RETRIES_LOST=1`` (or
+     JSON ``{"retries_lost": true}`` under --json) and a stderr note.
+     The non-zero exit lets a worker that captures ``$?`` distinguish
+     "queue genuinely empty, stop" (exit 0, no TASK) from "still
+     contended, back off and retry" (exit 8, RETRIES_LOST set).
      The legacy ``eval "$(pm pull)"`` pattern still works — it sets
      ``RETRIES_LOST=1`` in the worker shell, ``TASK`` stays empty, so
      workers that don't check ``$?`` behave exactly as before.
+
+  The claim's ``agent`` attribute is derived from --agent (if given),
+  else $PM_AGENT_ID, else ``worker-<context-id[:12]>`` when a
+  context-id is in play, else literal "pull". This keeps subsequent
+  ``pm heartbeat --context-id <CID>`` calls from failing with
+  exit 12 (lease lost) — they would otherwise see ``agent=pull`` on
+  the working status and refuse, defeating the point of heartbeats
+  for pull-claimed tasks.
 
 The default --regex extracts the path that follows
 ``Run /qualify-idea-toulmin `` on line 1 of task.text. Override with
@@ -47,6 +61,7 @@ import argparse
 import json
 import os
 import re
+import socket
 import sys
 
 import store
@@ -55,6 +70,19 @@ from now_iso import now_iso
 
 def shell_quote(v: str) -> str:
     return "'" + v.replace("'", "'\\''") + "'"
+
+
+def default_agent_id(context_id: str | None = None) -> str:
+    """Mirrors executing.py / heartbeat.py so a worker that pulls,
+    then heartbeats, then reports against the same task uses the same
+    agent identifier on every chain write — avoiding the lease-lost
+    (exit 12) false-positive on heartbeat."""
+    if env := os.environ.get("PM_AGENT_ID"):
+        return env
+    ctx = context_id or os.environ.get("PM_CONTEXT_ID")
+    if ctx:
+        return f"worker-{ctx[:12]}"
+    return "pull"
 
 
 def main() -> int:
@@ -70,10 +98,22 @@ def main() -> int:
                    help="sticky context id (overrides $PM_CONTEXT_ID). "
                         "Same selection semantics as `pm next --context-id`: "
                         "context-affinitive tasks come first, then FIFO.")
+    p.add_argument("--agent", default=None,
+                   help="agent identifier written to the claim's "
+                        "`agent` attribute. Defaults to $PM_AGENT_ID, else "
+                        "`worker-<context-id[:12]>` when a context-id is in "
+                        "play, else literal 'pull'. Matches the resolution "
+                        "in executing.py/heartbeat.py so subsequent "
+                        "heartbeats from the same worker don't false-fail.")
+    p.add_argument("--json", action="store_true",
+                   help="emit JSON instead of shell-eval-able assignments. "
+                        "Friendlier to restricted sandboxes that block "
+                        "`eval` or `$(...)` command substitution.")
     args = p.parse_args()
 
     pat = re.compile(args.regex)
     agent_context = args.context_id or os.environ.get("PM_CONTEXT_ID") or None
+    agent_id = args.agent or default_agent_id(args.context_id)
 
     # Per-invocation skip-set: tasks that lost a CAS race or failed a
     # precondition (status moved, sticky-ineligible) within this pull
@@ -160,6 +200,8 @@ def main() -> int:
             break
 
         if candidate is None:
+            if args.json:
+                print("null")
             return 0  # queue empty (or every runnable filtered out)
 
         sha = candidate["text_sha256"]
@@ -181,7 +223,7 @@ def main() -> int:
         prev_record_sha = latest_before["record_sha256"]
         try:
             store.append_claim(
-                sha, "pull", prev_record_sha,
+                sha, agent_id, prev_record_sha,
                 context_id=agent_context if is_sticky else None,
             )
         except store.ClaimLost:
@@ -200,13 +242,24 @@ def main() -> int:
         m = pat.search(text)
         idea_path = m.group(1) if m else ""
 
-        print(f"TASK={shell_quote(sha)}")
-        print(f"IDEA_PATH={shell_quote(idea_path)}")
-        print(f"SLUG={shell_quote(slug)}")
+        if args.json:
+            print(json.dumps({
+                "task": sha,
+                "idea_path": idea_path,
+                "slug": slug,
+                "agent": agent_id,
+            }))
+        else:
+            print(f"TASK={shell_quote(sha)}")
+            print(f"IDEA_PATH={shell_quote(idea_path)}")
+            print(f"SLUG={shell_quote(slug)}")
         return 0
 
     sys.stderr.write(f"pull: all {args.max_retries+1} attempts lost races\n")
-    print("RETRIES_LOST=1")
+    if args.json:
+        print(json.dumps({"retries_lost": True}))
+    else:
+        print("RETRIES_LOST=1")
     return 8
 
 

@@ -84,6 +84,13 @@ def main() -> int:
     p.add_argument("--cascade", action="store_true",
                    help="also reclaim every undone working descendant "
                         "(parentTask reverse-links)")
+    p.add_argument("--context-id", default=None,
+                   help="accepted for CLI symmetry with other pm verbs; "
+                        "reclaim is a supervisor override and does not "
+                        "consult the caller's sticky binding, so this "
+                        "flag is intentionally a no-op. Lets callers pass "
+                        "--context-id uniformly to every pm subcommand "
+                        "without special-casing reclaim.")
     args = p.parse_args()
 
     primary = reclaim_one(args.task,
