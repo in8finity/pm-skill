@@ -163,6 +163,92 @@ otherwise, listing the offending parent slugs. Bypass with
 `--allow-heavy-parent` for legacy / exceptional cases (and accept
 that you've taken the convention off the table for those parents).
 
+### Cross-queue parent/child: cascade-pause discipline
+
+The default and recommended pattern is **same-queue** parent+children:
+the runtime `children_settled` gate (`pm finished` exit 14) catches
+"close parent while children still pending" automatically, and the
+dashboard rollup reads naturally.
+
+When you genuinely need a parent on queue A with children on
+**a different queue B** (e.g. children are enrichment work that wants
+its own scheduling / sticky binding / worker pool separate from the
+parent's queue), the runtime gate **does not protect you**.
+`store.children_settled(parent_sha, queue)` (`store.py:623`) lists
+tasks via `get_work_package(queue)` — it scans the *parent's* queue
+only. A `parentTask` link pointing at the parent from a Task in
+queue B is invisible to that scan, so `pm finished` on the parent
+will happily close it while queue-B children are still `new` /
+`working`. The closed parent then blocks `cancel --cascade` /
+`reclaim --cascade` from reaching the orphaned children too —
+they're still wired up by the link, but the cascade walks from
+parents *down*, and a closed parent is a terminal node.
+
+**The discipline a worker must enforce by hand:**
+
+1. **Plan-time hint.** The parent's body should explicitly name
+   the subqueue it spawned and the slugs it spawned there. This is
+   the only durable signal a successor worker has — there's no
+   reverse-lookup MCP primitive that says "show me every queue
+   that has a child of this parent." Include in the parent body:
+
+   ```
+   Subqueue: enrich-walton-corpus
+   Subqueue-children: enrich-idea-001, enrich-idea-002, ...
+   ```
+
+2. **Detect "children haven't settled yet"** from the parent worker
+   before calling `pm finished`. Use `pm list` against the subqueue:
+
+   ```bash
+   pending=$(skills/pm/scripts/pm list --queue enrich-walton-corpus \
+             --state new --json | jq length)
+   working=$(skills/pm/scripts/pm list --queue enrich-walton-corpus \
+             --state working --json | jq length)
+   if (( pending + working > 0 )); then
+     # don't finish; pause instead (step 3)
+     ...
+   fi
+   ```
+
+3. **Pause without finishing.** Leave the parent in `working` and
+   attach a `pm report` documenting progress + what's still owed:
+
+   ```
+   printf '## Progress\n\nDrained 9/13 children on queue enrich-walton-corpus.\n\nOutstanding:\n- enrich-idea-010 (new)\n- enrich-idea-011 (new)\n- enrich-idea-012 (working — agent worker-c1de44…)\n- enrich-idea-013 (new)\n\nResume strategy: a successor worker should re-enter this parent (already working), re-check the subqueue, and either drain remaining or pause again.\n' \
+     | skills/pm/scripts/pm report --task "$PARENT_SHA" \
+                                   --title "subqueue still draining" \
+                                   --text -
+   ```
+
+   Heartbeating on the parent keeps the claim alive; if the worker is
+   stopping (e.g. rate-limit window), do **not** heartbeat — let
+   `pm sweep` reclaim the parent so a fresh worker can pick it up.
+
+4. **Successor handoff.** A worker that claims the parent via
+   `pm pull` (after sweep/reclaim) reads the latest `pm report` on
+   the parent to find the named subqueue and outstanding child
+   slugs. Re-runs step 2. Closes the parent (`pm finished`) only
+   when the subqueue lists 0 `new` + 0 `working` children.
+
+5. **Failure modes worth knowing.**
+
+   - A rogue worker that calls `pm finished` on the parent without
+     running step 2 will **succeed** — the runtime gate won't catch
+     it. There is no automatic enforcement; treat the parent-finish
+     call as a manual gate that the worker prompt must explicitly
+     check.
+   - `pm cancel --cascade <parent>` only cascades to **same-queue**
+     children. Cross-queue children must be cancelled separately
+     against their own queue.
+   - `pm reclaim --cascade <parent>` has the same limitation. If a
+     cross-queue subtree is stuck, you must reclaim its children
+     individually against their queue.
+
+A future change could promote the gate to cross-queue (e.g. via a
+reverse-link `find_items` query, no queue constraint) — until then,
+this discipline is the worker's responsibility, not the runtime's.
+
 ### Enqueueing many tasks at once — prefer `pm bulk-plan`
 
 When you are about to enqueue more than ~3 tasks in a row (e.g. one
