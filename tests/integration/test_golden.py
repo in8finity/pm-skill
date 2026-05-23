@@ -38,12 +38,13 @@ def fresh_queue(prefix: str) -> str:
 
 
 def pm(*args: str, env_extra: dict[str, str] | None = None,
-       cwd: str | None = None, check: bool = True) -> subprocess.CompletedProcess:
+       cwd: str | None = None, check: bool = True,
+       stdin: str | None = None) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     if env_extra:
         env.update(env_extra)
     proc = subprocess.run([PM, *args], capture_output=True, text=True,
-                          env=env, cwd=cwd)
+                          env=env, cwd=cwd, input=stdin)
     if check and proc.returncode != 0:
         raise AssertionError(
             f"pm {' '.join(args)} failed (exit {proc.returncode})\n"
@@ -2200,6 +2201,222 @@ def g53_cross_queue_isolation() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Sub-agent worker friction fixes (feedback 2026-05-24) + cross-queue gate
+# ---------------------------------------------------------------------------
+
+def g80_pull_writes_worker_agent_id_so_heartbeat_works() -> None:
+    """G80: `pm pull --context-id $CID` writes `agent=worker-<ctx[:12]>`
+    on the working TaskStatus (not literal "pull"), so a subsequent
+    `pm heartbeat --context-id $CID` from the same worker succeeds
+    instead of exiting 12 (lease lost). Fixes the friction reported
+    in feedback/sub-agent-worker-usage-2026-05-24.md item 2."""
+    q = fresh_queue("g80")
+    pm("plan", "--queue", q, "--title", "T", "--text", "x",
+       env_extra={"PM_WORKDIR": ""})
+    ctx = pm("context-id").stdout.strip()
+    env = {"PM_CONTEXT_ID": ctx, "PM_WORKDIR": ""}
+    out = pm("pull", "--queue", q, "--context-id", ctx, "--json",
+             env_extra=env).stdout.strip()
+    rec = json.loads(out)
+    expected_agent = f"worker-{ctx[:12]}"
+    assert_eq(rec["agent"], expected_agent,
+              "G80 pull must write agent=worker-<ctx[:12]>")
+    # Sanity-check the on-chain attribute too — not just the stdout label.
+    tip_agent = (store.latest_status(rec["task"]).get("attributes") or {}).get("agent")
+    assert_eq(tip_agent, expected_agent,
+              "G80 working TaskStatus.agent must match worker label on chain")
+    # Heartbeat with the same context must succeed (not exit 12).
+    hb = pm("heartbeat", "--task", rec["task"], "--context-id", ctx,
+            env_extra=env, check=False)
+    assert_eq(hb.returncode, 0,
+              f"G80 heartbeat must succeed (was exit 12 before fix); "
+              f"got {hb.returncode}\nstderr: {hb.stderr}")
+
+
+def g81_pull_json_output_shape() -> None:
+    """G81: `pm pull --json` emits a single-line JSON object on success
+    with task/idea_path/slug/agent, and literal `null` when the queue
+    is empty. Sandbox-friendly alternative to `eval "$(pm pull)"`."""
+    q = fresh_queue("g81")
+    # Empty queue → null
+    out_empty = pm("pull", "--queue", q, "--json").stdout.strip()
+    assert_eq(out_empty, "null", "G81 empty queue must print literal null")
+
+    pm("plan", "--queue", q, "--title", "T", "--text", "x",
+       env_extra={"PM_WORKDIR": ""})
+    out = pm("pull", "--queue", q, "--json").stdout.strip()
+    rec = json.loads(out)
+    for k in ("task", "idea_path", "slug", "agent"):
+        assert k in rec, f"G81 pull --json must include {k!r}; got {list(rec.keys())}"
+    assert isinstance(rec["task"], str) and len(rec["task"]) == 64, \
+        "G81 pull --json task must be a 64-char sha"
+
+
+def g82_report_text_dash_reads_stdin_with_newlines_preserved() -> None:
+    """G82: `pm report --text -` reads the report body from stdin
+    verbatim. Multi-line content with `\\n` characters survives —
+    eliminates the `cat > /tmp/...` precursor + dodges the
+    `--text "...\\n..."` shell-quote newline-loss footgun."""
+    q = fresh_queue("g82")
+    t = json.loads(pm("plan", "--queue", q, "--title", "T", "--text", "x",
+                      env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    pm("executing", "--task", t)
+    body = "line 1\n\n## Verifier Attestation\nverifier: noop\nverdict: PASS\nevidence: ok\n"
+    pm("report", "--task", t, "--title", "stdin-test", "--text", "-",
+       stdin=body)
+    latest = store.latest_report(t)
+    assert latest is not None, "G82 expected a report to be appended"
+    stored = latest.get("text", "")
+    # Body is stored verbatim plus a `\n#nonce:...` suffix appended by
+    # store.append_report. The original lines must each be present
+    # AT LINE START — that's what verifier-attestation regex parsing
+    # depends on.
+    for line in ("## Verifier Attestation", "verdict: PASS", "evidence: ok"):
+        assert f"\n{line}" in stored or stored.startswith(line), \
+            f"G82 line {line!r} must appear at line-start in stored body"
+
+
+def g83_reclaim_accepts_context_id_as_noop() -> None:
+    """G83: `pm reclaim --task T --context-id CID` is accepted (exit 0)
+    for CLI symmetry with other pm verbs. Reclaim is a supervisor
+    override and intentionally ignores the flag — the test ensures
+    it doesn't reject with `unrecognized arguments`."""
+    q = fresh_queue("g83")
+    t = json.loads(pm("plan", "--queue", q, "--title", "T", "--text", "x",
+                      env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    pm("executing", "--task", t)
+    ctx = pm("context-id").stdout.strip()
+    p = pm("reclaim", "--task", t, "--context-id", ctx,
+           "--reason", "G83 context-id no-op", check=False)
+    assert_eq(p.returncode, 0,
+              f"G83 reclaim must accept --context-id (exit 0); "
+              f"got {p.returncode}\nstderr: {p.stderr}")
+    assert_eq(store.status_value(store.latest_status(t)), "new",
+              "G83 task must be reclaimed to new")
+
+
+def g84_list_per_task_rows_and_state_filter() -> None:
+    """G84: `pm list --queue Q [--state S] [--json]` lists every task on
+    a queue with its current state. Verifies: (a) all states represented
+    in JSON; (b) `--state new` filters down to a single row; (c) text
+    output contains the expected column headers."""
+    q = fresh_queue("g84")
+    shas = []
+    for i in (1, 2, 3):
+        s = json.loads(pm("plan", "--queue", q, "--title", f"T{i}",
+                          "--text", "x",
+                          env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+        shas.append(s)
+    # Take T1 → done, T2 → working, T3 stays new.
+    pm("executing", "--task", shas[0])
+    pm("report", "--task", shas[0], "--title", "ok", "--text", "done")
+    pm("finished", "--task", shas[0])
+    pm("executing", "--task", shas[1])
+
+    rows = json.loads(pm("list", "--queue", q, "--json").stdout)
+    assert_eq(len(rows), 3, "G84 list should return all 3 tasks")
+    states = {r["state"] for r in rows}
+    assert_eq(states, {"new", "working", "done"},
+              f"G84 expected states {{new,working,done}}; got {states}")
+
+    only_new = json.loads(pm("list", "--queue", q,
+                             "--state", "new", "--json").stdout)
+    assert_eq(len(only_new), 1, "G84 --state new should return exactly 1 row")
+    assert_eq(only_new[0]["state"], "new", "G84 filtered row must be `new`")
+
+    text = pm("list", "--queue", q).stdout
+    for col in ("STATE", "SHA12", "DEPS", "SLUG"):
+        assert col in text, f"G84 text output must include column {col!r}"
+
+
+def g85_cross_queue_parent_finish_blocked_while_child_pending() -> None:
+    """G85: parent on queue A with a child on queue B. `pm finished` on
+    the parent must refuse with exit 14 — the cross-queue gate
+    (children_settled via global find_items) catches it. Without the
+    cross-queue change, this regressed silently because the per-queue
+    scan never saw the queue-B child."""
+    qa = fresh_queue("g85a")
+    qb = fresh_queue("g85b")
+    par = json.loads(pm("plan", "--queue", qa, "--title", "P",
+                        "--text", "Role: parent",
+                        env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    pm("plan", "--queue", qb, "--title", "C", "--text", "child",
+       "--parent", par, env_extra={"PM_WORKDIR": ""})
+    pm("executing", "--task", par)
+    pm("report", "--task", par, "--title", "draft", "--text", "x")
+    p = pm("finished", "--task", par, check=False)
+    assert_eq(p.returncode, 14,
+              f"G85 cross-queue parent finish must refuse with exit 14; "
+              f"got {p.returncode}\nstderr: {p.stderr}")
+    assert_eq(store.status_value(store.latest_status(par)), "working",
+              "G85 parent must stay in working after refused finish")
+
+
+def g86_cross_queue_parent_finish_succeeds_after_child_settles() -> None:
+    """G86: once the cross-queue child settles, `pm finished` on the
+    parent succeeds. Pairs with G85."""
+    qa = fresh_queue("g86a")
+    qb = fresh_queue("g86b")
+    par = json.loads(pm("plan", "--queue", qa, "--title", "P",
+                        "--text", "Role: parent",
+                        env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    kid = json.loads(pm("plan", "--queue", qb, "--title", "C", "--text", "kid",
+                        "--parent", par,
+                        env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    pm("executing", "--task", par)
+    pm("executing", "--task", kid)
+    pm("report", "--task", kid, "--title", "k", "--text", "kid done")
+    pm("finished", "--task", kid)
+    pm("report", "--task", par, "--title", "rollup", "--text", "all done")
+    pm("finished", "--task", par)
+    assert_eq(store.status_value(store.latest_status(par)), "done",
+              "G86 parent must close to done after cross-queue child settles")
+
+
+def g87_cross_queue_cancel_cascade_reaches_child() -> None:
+    """G87: `pm cancel --task <parent> --cascade` rejects the parent AND
+    a child living on a different queue. Pre-cross-queue, the cascade
+    only reached same-queue children — feedback item 7."""
+    qa = fresh_queue("g87a")
+    qb = fresh_queue("g87b")
+    par = json.loads(pm("plan", "--queue", qa, "--title", "P",
+                        "--text", "Role: parent",
+                        env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    kid = json.loads(pm("plan", "--queue", qb, "--title", "C", "--text", "kid",
+                        "--parent", par,
+                        env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    pm("executing", "--task", par)
+    pm("executing", "--task", kid)
+    pm("cancel", "--task", par, "--cascade", "--reason", "G87 supervisor kill")
+    for t in (par, kid):
+        assert_eq(store.status_value(store.latest_status(t)), "rejected",
+                  f"G87 task {t[:8]} must be rejected after cross-queue cascade")
+
+
+def g88_cross_queue_reclaim_cascade_reaches_child() -> None:
+    """G88: `pm reclaim --task <parent> --cascade` resets the parent AND
+    a working child on a different queue back to `new`. Pre-cross-queue,
+    the reclaim cascade missed cross-queue children — feedback item 7."""
+    qa = fresh_queue("g88a")
+    qb = fresh_queue("g88b")
+    par = json.loads(pm("plan", "--queue", qa, "--title", "P",
+                        "--text", "Role: parent",
+                        env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    kid = json.loads(pm("plan", "--queue", qb, "--title", "C", "--text", "kid",
+                        "--parent", par,
+                        env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    pm("executing", "--task", par)
+    pm("executing", "--task", kid)
+    pm("reclaim", "--task", par, "--cascade", "--reason", "G88 agent died")
+    for t in (par, kid):
+        latest = store.latest_status(t)
+        assert_eq(store.status_value(latest), "new",
+                  f"G88 task {t[:8]} must be reclaimed to new across queues")
+        assert (latest.get("attributes") or {}).get("reclaimed"), \
+            f"G88 task {t[:8]} latest status must carry reclaimed=true"
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
@@ -2275,6 +2492,15 @@ ALL_FLOWS = {
     "G69": g69_bulk_plan_allow_heavy_parent_bypasses_lint,
     "G70": g70_build_task_body_mode_parent_emits_marker,
     "G71": g71_build_task_body_iteration_toolkit_per_mode,
+    "G80": g80_pull_writes_worker_agent_id_so_heartbeat_works,
+    "G81": g81_pull_json_output_shape,
+    "G82": g82_report_text_dash_reads_stdin_with_newlines_preserved,
+    "G83": g83_reclaim_accepts_context_id_as_noop,
+    "G84": g84_list_per_task_rows_and_state_filter,
+    "G85": g85_cross_queue_parent_finish_blocked_while_child_pending,
+    "G86": g86_cross_queue_parent_finish_succeeds_after_child_settles,
+    "G87": g87_cross_queue_cancel_cascade_reaches_child,
+    "G88": g88_cross_queue_reclaim_cascade_reaches_child,
 }
 
 
