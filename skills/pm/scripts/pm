@@ -10,7 +10,8 @@
 #   pm report          [-- args for report.py]
 #   pm finished        [-- args for finished.py]
 #   pm heal            [-- args for heal_orphans.py]
-#   pm status          [-- args for queue_status.py]
+#   pm status          [-- args for queue_status.py — per-queue status counts]
+#   pm list            [-- args for list_tasks.py — per-task rows: state/sha/deps/slug; --json/--state filter]
 #   pm setup           [-- args for setup_schema.py]
 #   pm heartbeat       [-- args for heartbeat.py — tick a working task's lease]
 #   pm sweep           [-- args for sweep.py — reclaim stale (zombie) tasks]
@@ -54,6 +55,7 @@ case "${1:-}" in
   finished)   shift; exec "$DIR/finished.py" "$@" ;;
   heal)       shift; exec "$DIR/heal_orphans.py" "$@" ;;
   status)     shift; exec "$DIR/queue_status.py" "$@" ;;
+  list)       shift; exec "$DIR/list_tasks.py" "$@" ;;
   setup)      shift; exec "$DIR/setup_schema.py" "$@" ;;
   heartbeat)  shift; exec "$DIR/heartbeat.py" "$@" ;;
   sweep)      shift; exec "$DIR/sweep.py" "$@" ;;
@@ -72,12 +74,12 @@ case "${1:-}" in
   limits)     shift; exec "$DIR/limits.py" "$@" ;;
   smoke-test) shift; exec "$DIR/smoke_test.sh" "$@" ;;
   ""|-h|--help)
-    sed -n '2,30p' "$0"
+    sed -n '2,31p' "$0"
     exit 0
     ;;
   *)
     echo "pm: unknown subcommand '$1'" >&2
-    sed -n '2,30p' "$0" >&2
+    sed -n '2,31p' "$0" >&2
     exit 64
     ;;
 esac
