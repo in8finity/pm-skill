@@ -170,6 +170,31 @@ the runtime `children_settled` gate (`pm finished` exit 14) catches
 "close parent while children still pending" automatically, and the
 dashboard rollup reads naturally.
 
+**Before reaching for a separate queue, check the shape.** A common
+reason to want a separate queue is "the parent is doing real work
+and *also* needs to spawn children below it." That's the heavy-parent
+anti-pattern — see the "Parents are grouping nodes" section above.
+Three things collide when a parent does work AND has children:
+
+  1. The parent's claim is held by one worker for the entire span;
+     its lease has to stay alive through the children's drain (the
+     parent can't `pm finished` until `children_settled` is true).
+  2. If the parent worker is busy with long work and stops
+     heartbeating, sweep reclaims it — the original worker's
+     eventual chain writes fail with `ClaimLost`, and a successor
+     picks up a parent whose "real work" is happening elsewhere.
+  3. If the parent body is "summarize the children," it cannot run
+     until children finish, but the parent is already `working` —
+     the worker has to busy-wait or release the claim.
+
+The fix is to **extract a grouping parent** (empty body, `Role:
+parent`) and demote the original work to a sibling child. The
+rollup goes in another child with `depends_on=[all the siblings]`.
+This is what `pm bulk-plan` lints for (exit 12 without `Role:
+parent`); `pm build-task-body --mode parent` generates the
+conformant empty body. Only after the shape is right does the
+question of "same queue or separate queue" actually matter.
+
 When you genuinely need a parent on queue A with children on
 **a different queue B** (e.g. children are enrichment work that wants
 its own scheduling / sticky binding / worker pool separate from the
