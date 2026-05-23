@@ -173,18 +173,20 @@ dashboard rollup reads naturally.
 When you genuinely need a parent on queue A with children on
 **a different queue B** (e.g. children are enrichment work that wants
 its own scheduling / sticky binding / worker pool separate from the
-parent's queue), the runtime gate **does not protect you**.
-`store.children_settled(parent_sha, queue)` (`store.py:623`) lists
-tasks via `get_work_package(queue)` — it scans the *parent's* queue
-only. A `parentTask` link pointing at the parent from a Task in
-queue B is invisible to that scan, so `pm finished` on the parent
-will happily close it while queue-B children are still `new` /
-`working`. The closed parent then blocks `cancel --cascade` /
-`reclaim --cascade` from reaching the orphaned children too —
-they're still wired up by the link, but the cascade walks from
-parents *down*, and a closed parent is a terminal node.
+parent's queue), the runtime now protects you: `children_settled`
+(`store.py:623`) scans **all queues** via a single `find_items`
+call and filters on `links.parentTask`. `pm finished` on the parent
+will refuse with exit 14 while any cross-queue child is still
+`new`/`working`. `cancel --cascade` and `reclaim --cascade` walk the
+same cross-queue reverse-link, so a single cascade call against the
+parent reaches children on every queue.
 
-**The discipline a worker must enforce by hand:**
+**Worker-side discipline still recommended:**
+
+Even though the gate now enforces, a worker that knows it spawned
+cross-queue children should still announce them explicitly and
+checkpoint progress — successor workers have no out-of-band signal
+about which subqueue to look at if the parent is reclaimed mid-flight.
 
 1. **Plan-time hint.** The parent's body should explicitly name
    the subqueue it spawned and the slugs it spawned there. This is
@@ -231,23 +233,19 @@ parents *down*, and a closed parent is a terminal node.
    slugs. Re-runs step 2. Closes the parent (`pm finished`) only
    when the subqueue lists 0 `new` + 0 `working` children.
 
-5. **Failure modes worth knowing.**
+5. **What the runtime now enforces (vs. what's still on the worker):**
 
-   - A rogue worker that calls `pm finished` on the parent without
-     running step 2 will **succeed** — the runtime gate won't catch
-     it. There is no automatic enforcement; treat the parent-finish
-     call as a manual gate that the worker prompt must explicitly
-     check.
-   - `pm cancel --cascade <parent>` only cascades to **same-queue**
-     children. Cross-queue children must be cancelled separately
-     against their own queue.
-   - `pm reclaim --cascade <parent>` has the same limitation. If a
-     cross-queue subtree is stuck, you must reclaim its children
-     individually against their queue.
-
-A future change could promote the gate to cross-queue (e.g. via a
-reverse-link `find_items` query, no queue constraint) — until then,
-this discipline is the worker's responsibility, not the runtime's.
+   - `pm finished` on a parent with cross-queue children that are
+     still `new`/`working` → exit 14 (gate is cross-queue as of the
+     reverse-link-via-`find_items` refactor in `store.py`).
+   - `pm cancel --cascade <parent>` → cascades to children on every
+     queue, not just the parent's.
+   - `pm reclaim --cascade <parent>` → same; cross-queue.
+   - **Still on the worker:** announcing the subqueue + child slugs
+     in the parent body (no reverse-lookup primitive for a successor
+     to discover which queue children live on); checkpointing
+     progress between drain attempts; choosing whether to heartbeat
+     the parent through long subqueue drains or release it for sweep.
 
 ### Enqueueing many tasks at once — prefer `pm bulk-plan`
 

@@ -620,29 +620,57 @@ def cancel_task(
 TERMINAL_FOR_PARENT: frozenset[str] = frozenset({"done", "rejected", "superseded"})
 
 
-def children_settled(parent_sha: str, queue: str) -> bool:
-    """True iff every child of ``parent_sha`` (via parentTask reverse-link)
-    has a latest TaskStatus in ``TERMINAL_FOR_PARENT``. Used by the
-    parent-rolls-up-children gate at next/pull-time (non-sticky parents)
-    and at finish-time (all parents). See system-models/
-    planning_parent_gate.als."""
+def _find_children_global(parent_record_sha: str) -> list[dict[str, Any]]:
+    """All Tasks whose ``links.parentTask == parent_record_sha``, across
+    every queue. One MCP round trip via ``find_items``; the parentTask
+    filter is applied client-side because the link is stored as a
+    record_sha and the server's attributes-filter doesn't index links.
+
+    Cost is the same big-O as the previous per-queue scan (one
+    `find_items` returns the same Task projection as `get_work_package`
+    for the queue); the trade is a larger payload (all queues' Tasks
+    instead of one queue's) for cross-queue correctness."""
+    raw = mcp_client.tool("find_items", {"type": "Task", "limit": 10000})
+    items = _unwrap_items(raw)
+    return [
+        t for t in items
+        if (t.get("links") or {}).get("parentTask") == parent_record_sha
+    ]
+
+
+def children_settled(parent_sha: str, queue: str | None = None) -> bool:
+    """True iff every child of ``parent_sha`` (via parentTask reverse-link,
+    **across all queues**) has a latest TaskStatus in
+    ``TERMINAL_FOR_PARENT``. Used by the parent-rolls-up-children gate at
+    next/pull-time (non-sticky parents) and at finish-time (all parents).
+    See system-models/planning_parent_gate.als.
+
+    The ``queue`` parameter is accepted for backward compatibility and is
+    ignored — earlier versions scanned only the parent's own queue,
+    which silently let `pm finished` close parents whose children lived
+    on a different queue. The gate is now cross-queue."""
     parent = get_task(parent_sha)
     if parent is None:
         return True
     parent_record_sha = parent["record_sha256"]
-    for t in list_tasks(queue):
-        if (t.get("links") or {}).get("parentTask") != parent_record_sha:
-            continue
+    for t in _find_children_global(parent_record_sha):
         cur = status_value(latest_status(t["text_sha256"]))
         if cur not in TERMINAL_FOR_PARENT:
             return False
     return True
 
 
-def find_undone_subtasks(parent_sha: str, queue: str) -> list[dict[str, Any]]:
+def find_undone_subtasks(parent_sha: str, queue: str | None = None) -> list[dict[str, Any]]:
     """Return Tasks whose ``links.parentTask`` points at ``parent_sha`` and
     whose latest status is not in {done, rejected}. Used by cancel.py
-    --cascade.
+    and reclaim.py --cascade, and by the sticky-context descendant
+    walk in ``collect_required_contexts``.
+
+    Cross-queue: the scan covers all queues. The ``queue`` parameter is
+    accepted for backward compatibility and ignored — earlier versions
+    constrained the scan to one queue, which made
+    `cancel --cascade` / `reclaim --cascade` silently miss children
+    that lived on a different queue from the parent.
 
     Link values are ``record_sha256`` (hashharness link contract), so we
     resolve the parent's record_sha256 once and compare against that.
@@ -652,9 +680,7 @@ def find_undone_subtasks(parent_sha: str, queue: str) -> list[dict[str, Any]]:
         return []
     parent_record_sha = parent["record_sha256"]
     children: list[dict[str, Any]] = []
-    for t in list_tasks(queue):
-        if (t.get("links") or {}).get("parentTask") != parent_record_sha:
-            continue
+    for t in _find_children_global(parent_record_sha):
         sha = t["text_sha256"]
         cur = status_value(latest_status(sha))
         if cur in ("done", "rejected"):
