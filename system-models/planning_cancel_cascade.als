@@ -55,8 +55,16 @@ module planning_cancel_cascade
 abstract sig Phase {}
 one sig PNew, PWorking, PDone, PRejected extends Phase {}
 
+// Queues are how the runtime partitions Tasks for listing / scheduling.
+// Tasks on different queues link freely via parentTask — the cascade
+// walks the parent⁻¹ closure regardless of queue residency. Modeling
+// the field explicitly closes the gap where a queue-agnostic Task
+// could be misread as "the cascade is per-queue."
+sig Queue {}
+
 sig Task {
-  parent: lone Task,                    // parentTask link (immutable)
+  parent:    lone Task,                 // parentTask link (immutable)
+  taskQueue: one Queue,                 // immutable — Task lives on one queue
   var phase: lone Phase
 }
 
@@ -196,6 +204,27 @@ assert CC6_CascadeRefusesAbsorbingRoot {
 }
 check CC6_CascadeRefusesAbsorbingRoot for 4 but 8 steps
 
+// CC7: cross-queue closure — when a descendant lives on a different
+// queue from the root, the cascade still reaches it. Maps to the
+// runtime cross-queue find_items scan in
+// `store._find_children_global` (post-fix code in commit bb79ed8).
+// Functionally redundant with CC1/CC4 (which never reference queue,
+// so they already span all queue configurations) — kept as a
+// distinct assertion so a code-side carve-out like
+// "only cascade within parent's own queue" fails the model loudly
+// instead of silently passing because the existing assertions
+// didn't mention queue.
+assert CC7_CascadeIsCrossQueue {
+  always all root, child: Task |
+    (child.parent = root
+     and root.taskQueue != child.taskQueue
+     and cascadeCancel[root]
+     and child in Pending
+     and not isTerminal[child])
+      => after isTerminal[child]
+}
+check CC7_CascadeIsCrossQueue for 4 but 8 steps
+
 // ===== Liveness scenarios =====
 
 // Single-level cascade: root + one undone child both end up rejected.
@@ -244,3 +273,16 @@ run TryCascadeAffectsNonDescendant {
     )
 } for exactly 2 Task, 10 steps
 expect 0
+
+// Cross-queue scenario: root on queue qA, child on queue qB. Cancel
+// the root → the child is rejected too, demonstrating the cascade
+// closure walks across queue boundaries.
+run S4_CrossQueueCascade {
+  some disj qA, qB: Queue, disj root, child: Task |
+    child.parent = root and
+    root.taskQueue = qA and child.taskQueue = qB and
+    eventually (
+      isWorking[root] and isWorking[child] and
+      after (isRejected[root] and isRejected[child])
+    )
+} for exactly 2 Task, exactly 2 Queue, 8 steps

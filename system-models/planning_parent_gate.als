@@ -210,6 +210,23 @@ assert CrossQueueChildRunnableOnceParentClaimed {
 }
 check CrossQueueChildRunnableOnceParentClaimed for 6
 
+// Safety: a parent CANNOT finish while a child on a DIFFERENT queue
+// is still pending (SNew or SWorking). The rollup invariant is
+// cross-queue. Maps to:
+//   skills/pm/scripts/store.py    children_settled (global scan, post-fix)
+//   skills/pm/scripts/finished.py exit 14 when children_settled returns false
+// Redundant with ParentNotFinishedWhilePendingChild (queue-agnostic
+// quantifier), kept explicit so a future code-side "scan parent's
+// own queue only" optimization fails the model loudly.
+assert CrossQueueParentNotFinishedWhilePendingChild {
+  all p, c: Task |
+    (c.parent = p
+     and c.taskQueue != p.taskQueue
+     and c.status in (SNew + SWorking))
+      => not finishable[p]
+}
+check CrossQueueParentNotFinishedWhilePendingChild for 6
+
 // ---- concrete scenarios ----
 
 // Witness: a top-level parent with a Working child IS still runnable
@@ -321,3 +338,30 @@ run CrossQueueParentReleasesClaim {
     and c.status = SNew
     and runnable[c]
 } for exactly 2 Queue, exactly 2 Task
+
+// Witness: a SWorking parent on qA with a SWorking child on qB is
+// NOT finishable — the rollup gate spans queues. Should be SAT (a
+// concrete witness of the gate firing).
+run CrossQueueParentBlockedAtFinish {
+  some disj qA, qB: Queue, disj p, c: Task |
+    c.parent = p
+    and p.taskQueue = qA
+    and c.taskQueue = qB
+    and p.status = SWorking
+    and c.status = SWorking
+    and not finishable[p]
+} for exactly 2 Queue, exactly 2 Task
+
+// Negative: try to finish a parent on qA while its cross-queue
+// child on qB is still SWorking. Should be UNSAT under
+// CrossQueueParentNotFinishedWhilePendingChild.
+run TryCrossQueueParentFinishWithPendingChild {
+  some disj qA, qB: Queue, disj p, c: Task |
+    c.parent = p
+    and p.taskQueue = qA
+    and c.taskQueue = qB
+    and p.status = SWorking
+    and c.status = SWorking
+    and finishable[p]
+} for exactly 2 Queue, exactly 2 Task
+expect 0

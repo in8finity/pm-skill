@@ -53,8 +53,17 @@ one sig PNew, PWorking, PDone, PRejected extends Phase {}
 
 sig Agent {}
 
+// Queues are how the runtime partitions Tasks for listing / scheduling.
+// Tasks on different queues link freely via parentTask — the cascade
+// walks the parent⁻¹ closure regardless of queue residency. Explicit
+// here so a future "scan parent's queue only" optimization fails the
+// model loudly instead of silently matching the queue-agnostic
+// assertions below.
+sig Queue {}
+
 sig Task {
-  parent: lone Task,                    // parentTask link (immutable)
+  parent:    lone Task,                 // parentTask link (immutable)
+  taskQueue: one Queue,                 // immutable — Task lives on one queue
   var phase: lone Phase,
   var owner: lone Agent
 }
@@ -207,6 +216,24 @@ assert RC6_ReclaimRefusesNonWorkingRoot {
 }
 check RC6_ReclaimRefusesNonWorkingRoot for 4 but 8 steps
 
+// RC7: cross-queue closure — when a working descendant lives on a
+// different queue from the root, the reclaim cascade still reaches
+// it. Maps to the runtime cross-queue find_items scan in
+// `store._find_children_global` (post-fix code in commit bb79ed8).
+// Functionally redundant with RC1/RC4 (queue-agnostic by construction)
+// — kept distinct so a code-side carve-out like "scan parent's
+// queue only" fails the model loudly instead of silently passing.
+assert RC7_CascadeIsCrossQueue {
+  always all root, child: Task |
+    (child.parent = root
+     and root.taskQueue != child.taskQueue
+     and cascadeReclaim[root]
+     and child in Pending
+     and isWorking[child])
+      => after (isNew[child] and no child.owner)
+}
+check RC7_CascadeIsCrossQueue for 4 but 8 steps
+
 // Bonus: post-reclaim there is no owner anywhere in the reclaimed set.
 assert RC_OwnerStrippedFromReclaimedSet {
   always all root: Task |
@@ -266,3 +293,17 @@ run TryReclaimDoneRoot {
   )
 } for exactly 1 Task, exactly 1 Agent, 8 steps
 expect 0
+
+// S4: cross-queue cascade — root on qA + working child on qB.
+// Reclaim root → child reclaimed too despite the queue boundary.
+// Witness for RC7.
+run S4_CrossQueueCascade {
+  some disj qA, qB: Queue, disj root, child: Task, a: Agent |
+    child.parent = root and
+    root.taskQueue = qA and child.taskQueue = qB and
+    eventually (
+      isWorking[root] and isWorking[child] and root.owner = a and
+      after (isNew[root] and isNew[child]
+             and no root.owner and no child.owner)
+    )
+} for exactly 2 Task, exactly 2 Queue, exactly 1 Agent, 8 steps
