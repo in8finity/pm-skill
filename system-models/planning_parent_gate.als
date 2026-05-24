@@ -31,14 +31,31 @@ module planning_parent_gate
     5. RejectedChildIsTerminalForGate — a parent with only Rejected
        children IS runnable (otherwise a failed subtree would orphan
        its parent forever).
+    6. CrossQueueChildBlockedUntilParentClaimed — the parent-claim
+       gate is universal: it fires regardless of which queue the
+       parent or child lives on. Adding a `queue` field to Task makes
+       this explicit so future reviewers don't read the absence of
+       queue as "the gate is per-queue."
+    7. CrossQueueChildRunnableOnceParentClaimed — symmetric liveness:
+       once the parent (anywhere) moves past SNew, a SNew child IS
+       runnable, queue-irrelevant.
 */
 
 abstract sig Status {}
 one sig SNew, SWorking, SDone, SRejected, SSuperseded extends Status {}
 
+// Queues are how the runtime partitions Tasks for listing / scheduling.
+// A Task lives on exactly one queue, but parent/child links cross
+// queue boundaries freely — they are content-addressed by record_sha,
+// not scoped by queue. Modeling this explicitly closes the gap where
+// a queue-agnostic Task could be misread as "the model assumes
+// everything lives in one queue."
+sig Queue {}
+
 sig Task {
-  parent: lone Task,
-  status: one Status
+  parent:    lone Task,
+  status:    one Status,
+  taskQueue: one Queue
 }
 
 // No cycles in the parent graph (already enforced by data model).
@@ -155,6 +172,44 @@ assert NoSelfBlocking {
 }
 check NoSelfBlocking for 6
 
+// ===== Cross-queue assertions =====
+// These re-express the parent-claim gate explicitly across queues.
+// Functionally redundant with ChildBlockedUntilParentClaimed /
+// ChildRunnableOnceParentClaimed (which never reference queue, so
+// they already span all queue configurations), but worth stating
+// directly so a code-side carve-out like:
+//     if parent_record not in current_queue_listing: treat_as_no_parent()
+// fails the model loudly instead of silently passing because the
+// assertion's quantifier didn't mention queue. Maps to:
+//   skills/pm/scripts/next.py       (parent_claimed)
+//   skills/pm/scripts/pull.py       (parent_claimed)
+//   skills/pm/scripts/executing.py  (hard parent gate, exit 15)
+
+// Safety: a child whose parent lives on a DIFFERENT queue is still
+// blocked while the parent is SNew. The gate is about lifecycle
+// ownership, not co-queue residency.
+assert CrossQueueChildBlockedUntilParentClaimed {
+  all c, p: Task |
+    (c.parent = p
+     and p.status = SNew
+     and c.status = SNew
+     and c.taskQueue != p.taskQueue)
+      => not runnable[c]
+}
+check CrossQueueChildBlockedUntilParentClaimed for 6
+
+// Liveness: once the parent on queue A moves past SNew, the child on
+// queue B IS runnable. Symmetric to ChildRunnableOnceParentClaimed.
+assert CrossQueueChildRunnableOnceParentClaimed {
+  all c, p: Task |
+    (c.parent = p
+     and c.status = SNew
+     and p.status != SNew
+     and c.taskQueue != p.taskQueue)
+      => runnable[c]
+}
+check CrossQueueChildRunnableOnceParentClaimed for 6
+
 // ---- concrete scenarios ----
 
 // Witness: a top-level parent with a Working child IS still runnable
@@ -225,3 +280,44 @@ run UnblockedAfterAllChildrenDone {
     and (all c: children[p] | c.status = SDone)
     and runnable[p]
 } for 4
+
+// ===== Cross-queue scenarios =====
+
+// Witness: a cross-queue parent on queue qA in SNew blocks claim of
+// its SNew child on queue qB. Should be SAT — finding the gated
+// configuration is the whole point of the assertion.
+run CrossQueueParentBlocksClaim {
+  some disj qA, qB: Queue, disj p, c: Task |
+    c.parent = p
+    and p.taskQueue = qA
+    and c.taskQueue = qB
+    and p.status = SNew
+    and c.status = SNew
+    and not runnable[c]
+} for exactly 2 Queue, exactly 2 Task
+
+// Negative: a cross-queue child whose parent is SNew CANNOT be
+// runnable. Should be UNSAT under CrossQueueChildBlockedUntilParentClaimed.
+run TryCrossQueueChildRunWithUnclaimedParent {
+  some disj qA, qB: Queue, disj p, c: Task |
+    c.parent = p
+    and p.taskQueue = qA
+    and c.taskQueue = qB
+    and p.status = SNew
+    and c.status = SNew
+    and runnable[c]
+} for exactly 2 Queue, exactly 2 Task
+expect 0
+
+// Witness: once the parent (queue qA) is claimed, the cross-queue
+// child (queue qB) IS runnable. Liveness witness for the symmetric
+// assertion. Should be SAT.
+run CrossQueueParentReleasesClaim {
+  some disj qA, qB: Queue, disj p, c: Task |
+    c.parent = p
+    and p.taskQueue = qA
+    and c.taskQueue = qB
+    and p.status = SWorking
+    and c.status = SNew
+    and runnable[c]
+} for exactly 2 Queue, exactly 2 Task
