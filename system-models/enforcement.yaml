@@ -147,7 +147,7 @@
 # =====================================================================
 
 - id: lease_live_worker_actions
-  description: only an alive (or rebinding) agent can claim/report/finish; zombie heartbeats refused.
+  description: only an alive (or rebinding) agent can claim/report/finish; zombie heartbeats refused. Agent identifier resolution is shared across pull/executing/heartbeat so pull-then-heartbeat from the same worker doesn't false-fail.
   models:
     - file: system-models/planning_lease.als
       asserts: [LiveWorkerActions]
@@ -155,10 +155,22 @@
     - file: skills/pm/scripts/heartbeat.py
       must_match: 'lease lost|zombie heartbeat'
       must_exit: 12
+    # Identity-stability coupling: all three sites must resolve the
+    # agent identifier via the same `default_agent_id` helper so the
+    # `agent` attribute on the working TaskStatus matches whatever the
+    # subsequent heartbeat / finish call reads. The bug fixed in
+    # commit df04513 was `pull.py` writing literal "pull" instead of
+    # `worker-<ctx[:12]>`, causing exit-12 false-positives.
+    - file: skills/pm/scripts/pull.py
+      must_call: default_agent_id
+    - file: skills/pm/scripts/executing.py
+      must_call: default_agent_id
+    - file: skills/pm/scripts/heartbeat.py
+      must_call: default_agent_id
   skill_texts:
     - file: skills/pm/scripts/heartbeat.py
       must_mention: ["lease", "12"]
-  tests: [G22]
+  tests: [G22, G80]                          # G80: pull→heartbeat identity stability
 
 - id: lease_no_zombie_after_reclaim
   description: after reclaim a task is genuinely PNew with no owner; reports survive.
@@ -324,18 +336,23 @@
 # =====================================================================
 
 - id: cancel_cascade_descends
-  description: cancel --cascade reaches every undone descendant via parentTask reverse-links (transitive).
+  description: cancel --cascade reaches every undone descendant via parentTask reverse-links (transitive), across all queues.
   models:
     - file: system-models/planning_cancel_cascade.als
-      asserts: [CC1_NoDescendantLeftUndone, CC4_CascadeIsParentTransitive]
+      asserts:
+        - CC1_NoDescendantLeftUndone
+        - CC4_CascadeIsParentTransitive
+        - CC7_CascadeIsCrossQueue
   code_gates:
     - file: skills/pm/scripts/cancel.py
       must_call: cascade
       must_match: 'parentTask|reverse-link'
+    - file: skills/pm/scripts/store.py
+      must_call: _find_children_global       # cross-queue reverse-link scan
   skill_texts:
     - file: skills/pm/scripts/cancel.py
       must_mention: ["cascade", "parentTask"]
-  tests: [G11, G27]
+  tests: [G11, G27, G87]                     # G87: cross-queue cascade
 
 - id: cancel_cascade_skips_absorbing
   description: cascade leaves already-terminal descendants untouched.
@@ -383,18 +400,23 @@
 # =====================================================================
 
 - id: reclaim_cascade_descends
-  description: reclaim --cascade reaches every working descendant via parentTask (transitive).
+  description: reclaim --cascade reaches every working descendant via parentTask (transitive), across all queues.
   models:
     - file: system-models/planning_reclaim_cascade.als
-      asserts: [RC1_NoWorkingDescendantLeftWorking, RC4_CascadeIsParentTransitive]
+      asserts:
+        - RC1_NoWorkingDescendantLeftWorking
+        - RC4_CascadeIsParentTransitive
+        - RC7_CascadeIsCrossQueue
   code_gates:
     - file: skills/pm/scripts/reclaim.py
       must_call: cascade
       must_match: 'parentTask|reverse-link'
+    - file: skills/pm/scripts/store.py
+      must_call: _find_children_global       # cross-queue reverse-link scan
   skill_texts:
     - file: skills/pm/scripts/reclaim.py
       must_mention: ["cascade", "parentTask"]
-  tests: [G12, G30]
+  tests: [G12, G30, G88]                     # G88: cross-queue cascade
 
 - id: reclaim_cascade_skips_non_working
   description: reclaim --cascade only touches working descendants; new/done/rejected untouched.
@@ -515,28 +537,77 @@
 # planning_parent_gate.als — parent-rolls-up-children gate
 # =====================================================================
 
-- id: parent_rolls_up_children
-  description: pm next/pull skips a parent task whose children aren't all in {done, rejected, superseded}.
+# =====================================================================
+# Parent-rollup gate lives at FINISH-time only (commit eaade69 moved
+# it from next/pull-time to finished.py). Cross-queue scan added in
+# commit bb79ed8. Tracked separately from the parent-CLAIM gate
+# (next entry) — they enforce orthogonal halves of the convention
+# "parent owns the subtree's lifecycle".
+# =====================================================================
+
+- id: parent_rolls_up_children_at_finish
+  description: pm finished refuses to close a parent while any child (any queue) is still new/working — the rollup invariant at finish-time.
   models:
     - file: system-models/planning_parent_gate.als
       asserts:
-        - ParentBlockedByPendingChild
-        - ParentRunnableAfterChildrenSettle
-        - NoSelfBlocking
-        - ChildlessNewTaskRunnable
-        - RejectedChildIsTerminalForGate
-        - SupersededChildIsTerminalForGate
+        - ParentNotFinishedWhilePendingChild
+        - SDoneChainRecursesToGrandchildren
+        - CrossQueueParentNotFinishedWhilePendingChild
   code_gates:
+    - file: skills/pm/scripts/finished.py
+      must_call: children_settled
+      must_exit: 14
+    - file: skills/pm/scripts/store.py
+      must_match: 'def children_settled'
+      must_call: _find_children_global       # cross-queue scan
+  skill_texts:
+    - file: skills/pm/scripts/finished.py
+      must_mention: ["children", "rollup"]
+  tests: [G34, G44, G56, G57, G85, G86]      # G85/G86: cross-queue finish gate
+
+# =====================================================================
+# Parent-CLAIM gate lives at next/pull/executing — a child can't
+# start until its parent's lifecycle has begun (parent.status != new).
+# Cross-queue gate added in commit c662a03 to close the asymmetry
+# with the finish-time gate above.
+# =====================================================================
+
+- id: parent_claim_gate
+  description: pm next/pull/executing refuse to surface or claim a child whose parent (any queue) is still in `new`.
+  models:
+    - file: system-models/planning_parent_gate.als
+      asserts:
+        - ChildBlockedUntilParentClaimed
+        - ChildRunnableOnceParentClaimed
+        - CrossQueueChildBlockedUntilParentClaimed
+        - CrossQueueChildRunnableOnceParentClaimed
+        - TopLevelTaskAlwaysRunnable
+        - ChildlessNewTaskRunnable
+        - NoSelfBlocking
+  code_gates:
+    # Same-queue selection gate (next/pull) — refuse to surface a
+    # child whose parent.status is still `new`.
     - file: skills/pm/scripts/next.py
-      must_call: children_settled
-      must_match: 'TERMINAL_FOR_PARENT'
+      must_call: parent_claimed
+      must_match: 'task_status_by_record_sha'      # cross-queue fallback lookup
     - file: skills/pm/scripts/pull.py
-      must_call: children_settled
-      must_match: 'TERMINAL_FOR_PARENT'
+      must_call: parent_claimed
+      must_match: 'task_status_by_record_sha'      # cross-queue fallback lookup
+    # Hard claim gate (executing) — exit 15 when parent.status == `new`,
+    # including when parent lives on a different queue.
+    - file: skills/pm/scripts/executing.py
+      must_match: 'task_status_by_record_sha'      # cross-queue fallback lookup
+      must_exit: 15
+    # Helper definition (single source of truth for the cross-queue
+    # parent-status lookup; callers above must use it).
+    - file: skills/pm/scripts/store.py
+      must_match: 'def task_status_by_record_sha'
   skill_texts:
     - file: skills/pm/scripts/next.py
-      must_mention: ["children", "terminal"]
-  tests: [G33, G34, G35, G44]
+      must_mention: ["parent", "lifecycle"]
+    - file: skills/pm/scripts/executing.py
+      must_mention: ["parent-claim", "15"]
+  tests: [G33, G35, G62, G63, G64, G89, G90] # G89/G90: cross-queue claim gate
 
 # =====================================================================
 # planning_replan_with_parent_gate.als — cross-feature composition
@@ -554,7 +625,11 @@
   code_gates:
     - file: skills/pm/scripts/replan.py
       must_call: reset_in_place
-    - file: skills/pm/scripts/next.py
+    # Rollup gate lives at finish-time (commit eaade69 moved it from
+    # next.py). Composition with replan is: a replanned chain that
+    # eventually finishes still has the rollup invariant enforced by
+    # finished.py.
+    - file: skills/pm/scripts/finished.py
       must_call: children_settled
   skill_texts:
     - file: skills/pm/scripts/replan.py
