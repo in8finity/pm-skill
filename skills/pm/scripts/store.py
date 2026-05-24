@@ -620,6 +620,37 @@ def cancel_task(
 TERMINAL_FOR_PARENT: frozenset[str] = frozenset({"done", "rejected", "superseded"})
 
 
+def task_status_by_record_sha(parent_record_sha: str) -> str | None:
+    """Cross-queue status lookup: given a parent's ``record_sha256``
+    (the value the runtime writes into ``links.parentTask``), return
+    the latest TaskStatus value for that Task. Returns ``None`` if no
+    Task with that record_sha exists anywhere — a truly orphaned link.
+
+    Used by the parent-claim gate when the per-queue listing in the
+    caller (e.g. ``next.py`` / ``pull.py`` / ``executing.py``) does
+    NOT contain the parent — i.e. when the parent lives on a
+    different queue from the child being claimed. Without this
+    helper, those sites would silently treat a cross-queue parent
+    as "no parent" and let the child run before its parent was
+    claimed — violating the cross-queue gate proven by
+    ``planning_parent_gate.als#CrossQueueChildBlockedUntilParentClaimed``.
+
+    Cost: one ``find_items`` round trip. Callers that look up
+    multiple cross-queue parents in a single invocation should cache
+    the global Task list themselves (the typical pattern in the
+    pull/next loops is at most a handful of cross-queue candidates,
+    so the per-call uncached cost is acceptable; the lazy-cache
+    optimization is in the loop, not here)."""
+    raw = mcp_client.tool("find_items", {"type": "Task", "limit": 10000})
+    items = _unwrap_items(raw)
+    for t in items:
+        if t.get("record_sha256") == parent_record_sha:
+            text_sha = t.get("text_sha256")
+            if text_sha:
+                return status_value(latest_status(text_sha))
+    return None
+
+
 def _find_children_global(parent_record_sha: str) -> list[dict[str, Any]]:
     """All Tasks whose ``links.parentTask == parent_record_sha``, across
     every queue. One MCP round trip via ``find_items``; the parentTask

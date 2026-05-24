@@ -112,25 +112,34 @@ def main() -> int:
     # The convention is "child can't start until parent's lifecycle has
     # begun"; this hard gate makes it real regardless of how the worker
     # arrived at the sha (direct dispatch, build-task-body, resume, etc.).
-    # Cross-queue parent treated as no parent (the gate is about
-    # co-queue lifecycle ownership). See planning_parent_gate.als.
+    # **Universal across queues** — when the parent lives on a
+    # different queue from this task, fall back to a global
+    # record-sha lookup rather than skipping the gate. See
+    # planning_parent_gate.als#ChildBlockedUntilParentClaimed and
+    # #CrossQueueChildBlockedUntilParentClaimed.
     parent_record = (task.get("links") or {}).get("parentTask") if task else None
     if parent_record:
         queue = ((task or {}).get("attributes") or {}).get("queue", "default")
+        parent_status: str | None = None
+        parent_text: str | None = None
         for sibling in store.list_tasks(queue):
             if sibling.get("record_sha256") == parent_record:
                 parent_text = sibling["text_sha256"]
                 parent_status = store.status_value(store.latest_status(parent_text))
-                if parent_status == "new":
-                    sys.stderr.write(
-                        f"refusing: task {args.task[:12]} has parent "
-                        f"{parent_text[:12]} still in `new` — claim the "
-                        f"parent first to bind the subtree's lifecycle. "
-                        f"See `skills/pm/plan/SKILL.md` \"Parents are "
-                        f"grouping nodes\".\n"
-                    )
-                    return 15
                 break
+        if parent_status is None:
+            # Parent on a different queue — global lookup. Returns
+            # None for truly dangling links; only refuse on `new`.
+            parent_status = store.task_status_by_record_sha(parent_record)
+        if parent_status == "new":
+            label = parent_text[:12] if parent_text else "(cross-queue)"
+            sys.stderr.write(
+                f"refusing: task {args.task[:12]} has parent "
+                f"{label} still in `new` — claim the parent first to "
+                f"bind the subtree's lifecycle. See `skills/pm/plan/"
+                f"SKILL.md` \"Parents are grouping nodes\".\n"
+            )
+            return 15
 
     if is_sticky:
         if not agent_context:

@@ -2393,6 +2393,83 @@ def g87_cross_queue_cancel_cascade_reaches_child() -> None:
                   f"G87 task {t[:8]} must be rejected after cross-queue cascade")
 
 
+def g89_cross_queue_child_blocked_until_parent_claimed() -> None:
+    """G89: a child on queue B whose parent lives on queue A and is
+    still `new` must NOT be claimable. Previously the per-queue
+    record_to_text lookup in next.py/pull.py/executing.py
+    short-circuited cross-queue parents to "no parent" and let the
+    child run early — violating the gate proven by
+    planning_parent_gate.als#CrossQueueChildBlockedUntilParentClaimed.
+
+    Verifies all three sites:
+      * `pm next --queue B`  → returns null (child filtered out)
+      * `pm pull --queue B`  → exits 0 with no TASK (queue empty per filter)
+      * `pm executing --task <child>` → exit 15 (hard refusal)"""
+    qa = fresh_queue("g89a")
+    qb = fresh_queue("g89b")
+    par = json.loads(pm("plan", "--queue", qa, "--title", "P",
+                        "--text", "Role: parent",
+                        env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    kid = json.loads(pm("plan", "--queue", qb, "--title", "C", "--text", "kid",
+                        "--parent", par,
+                        env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+
+    # Parent is still SNew. The child must be invisible to next/pull and
+    # rejected by executing.
+    nxt = pm("next", "--queue", qb,
+             env_extra={"PM_WORKDIR": ""}).stdout.strip()
+    assert_eq(nxt, "null",
+              f"G89 pm next must filter out child whose cross-queue "
+              f"parent is `new`; got {nxt}")
+
+    pull_out = pm("pull", "--queue", qb, "--json").stdout.strip()
+    assert_eq(pull_out, "null",
+              f"G89 pm pull must filter out child whose cross-queue "
+              f"parent is `new`; got {pull_out}")
+
+    p = pm("executing", "--task", kid, check=False)
+    assert_eq(p.returncode, 15,
+              f"G89 pm executing on cross-queue child must exit 15 "
+              f"(parent-claim refusal); got {p.returncode}\n"
+              f"stderr: {p.stderr}")
+    assert_eq(store.status_value(store.latest_status(kid)), "new",
+              "G89 child must stay in new after refused claim")
+
+
+def g90_cross_queue_child_runnable_once_parent_claimed() -> None:
+    """G90: once the cross-queue parent (queue A) moves past `new`,
+    the child on queue B becomes runnable. Liveness pair with G89.
+    Verifies the gate releases — not just that it refuses.
+
+    Maps to planning_parent_gate.als
+    #CrossQueueChildRunnableOnceParentClaimed."""
+    qa = fresh_queue("g90a")
+    qb = fresh_queue("g90b")
+    par = json.loads(pm("plan", "--queue", qa, "--title", "P",
+                        "--text", "Role: parent",
+                        env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    kid = json.loads(pm("plan", "--queue", qb, "--title", "C", "--text", "kid",
+                        "--parent", par,
+                        env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+
+    # Claim the parent on queue A — its lifecycle begins.
+    pm("executing", "--task", par)
+
+    # Now the cross-queue child should be runnable on queue B.
+    nxt = pm("next", "--queue", qb,
+             env_extra={"PM_WORKDIR": ""}).stdout.strip()
+    assert nxt != "null", \
+        "G90 child must be visible to pm next once parent is claimed"
+    returned = json.loads(nxt)["text_sha256"]
+    assert_eq(returned, kid,
+              f"G90 pm next must return the unblocked child; got {returned[:12]}")
+
+    # And executing must succeed.
+    pm("executing", "--task", kid)
+    assert_eq(store.status_value(store.latest_status(kid)), "working",
+              "G90 child must claim cleanly after parent is past new")
+
+
 def g88_cross_queue_reclaim_cascade_reaches_child() -> None:
     """G88: `pm reclaim --task <parent> --cascade` resets the parent AND
     a working child on a different queue back to `new`. Pre-cross-queue,
@@ -2501,6 +2578,8 @@ ALL_FLOWS = {
     "G86": g86_cross_queue_parent_finish_succeeds_after_child_settles,
     "G87": g87_cross_queue_cancel_cascade_reaches_child,
     "G88": g88_cross_queue_reclaim_cascade_reaches_child,
+    "G89": g89_cross_queue_child_blocked_until_parent_claimed,
+    "G90": g90_cross_queue_child_runnable_once_parent_claimed,
 }
 
 

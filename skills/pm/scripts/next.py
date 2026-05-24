@@ -97,22 +97,38 @@ def main() -> int:
             return False
         return status_of(d_text) == "done"
 
+    # Lazy cache for cross-queue parent lookups inside parent_claimed.
+    # Populated only when a child's parent_record is not in the per-
+    # queue listing — typical pm next call doesn't touch it.
+    xq_parent_status_cache: dict[str, str | None] = {}
+
     def parent_claimed(t: dict) -> bool:
         """A child is runnable only after its parent's lifecycle has begun.
         Parent-claim gate enforces the convention "parent owns the
         subtree's lifecycle / binds the context": children can't start
         until somebody has claimed the parent. A parent in `working` /
         `done` / `rejected` / `superseded` satisfies the gate (the
-        lifecycle has begun). Cross-queue parent treated as "no parent"
-        for the gate (the gate is about co-queue lifecycle ownership).
-        See planning_parent_gate.als#ChildBlockedUntilParentClaimed."""
+        lifecycle has begun). The gate is **universal across queues** —
+        if the parent isn't in the current queue's listing, we look
+        it up globally rather than treating it as "no parent." See
+        planning_parent_gate.als#ChildBlockedUntilParentClaimed and
+        #CrossQueueChildBlockedUntilParentClaimed."""
         parent_record = (t.get("links") or {}).get("parentTask")
         if not parent_record:
             return True  # no parent — top-level task
         parent_text = record_to_text.get(parent_record)
-        if parent_text is None:
-            return True  # cross-queue parent — not our gate to enforce
-        return status_of(parent_text) != "new"
+        if parent_text is not None:
+            return status_of(parent_text) != "new"
+        # Cross-queue parent: fall back to a global record-sha lookup
+        # so the gate fires uniformly. Cached per `pm next` invocation
+        # to keep the worst-case cost bounded.
+        if parent_record not in xq_parent_status_cache:
+            xq_parent_status_cache[parent_record] = \
+                store.task_status_by_record_sha(parent_record)
+        cached = xq_parent_status_cache[parent_record]
+        if cached is None:
+            return True  # dangling parent link — no Task exists at all
+        return cached != "new"
 
     workdir_skipped = 0
     for t in tasks:

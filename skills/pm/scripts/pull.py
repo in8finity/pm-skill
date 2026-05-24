@@ -161,14 +161,30 @@ def main() -> int:
             d_text = record_to_text.get(d_record)
             return d_text is not None and status_of(d_text) == "done"
 
+        # Per-iteration cache for cross-queue parent lookups. Re-built
+        # each retry attempt because the parent's status can change
+        # (claim, finish, reclaim) between attempts.
+        xq_parent_status_cache: dict[str, str | None] = {}
+
         def parent_claimed(t: dict) -> bool:
+            """Cross-queue parent-claim gate. Mirrors next.py:parent_claimed.
+            See planning_parent_gate.als#ChildBlockedUntilParentClaimed and
+            #CrossQueueChildBlockedUntilParentClaimed."""
             parent_record = (t.get("links") or {}).get("parentTask")
             if not parent_record:
                 return True
             parent_text = record_to_text.get(parent_record)
-            if parent_text is None:
-                return True
-            return status_of(parent_text) != "new"
+            if parent_text is not None:
+                return status_of(parent_text) != "new"
+            # Cross-queue parent fallback — one global record-sha
+            # lookup, cached per pull invocation.
+            if parent_record not in xq_parent_status_cache:
+                xq_parent_status_cache[parent_record] = \
+                    store.task_status_by_record_sha(parent_record)
+            cached = xq_parent_status_cache[parent_record]
+            if cached is None:
+                return True  # dangling parent link
+            return cached != "new"
 
         candidate = None
         for t in tasks:
