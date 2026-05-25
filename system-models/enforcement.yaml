@@ -1,26 +1,32 @@
 # Enforcement map — one entry per verified property (or tightly-grouped
 # property cluster). Each entry asserts that the property is enforced by
 # named code gates, documented in skill prose, and exercised by golden
-# tests. The checker (`check_enforcement.py`) AST-parses the code +
+# tests. The checker (`system-models/scripts/check_enforcement.py`,
+# vendored from the formal-modeling plugin) AST-parses the code +
 # greps the prose/tests; an entry passes only when EVERY cited gate is
 # still present.
 #
-# Per-entry shape:
-#   id            — short slug, kebab-case
-#   description   — one-line semantic intent
-#   models        — list of {file, asserts: [name, ...]}
-#   code_gates    — list of {file, must_call?, must_match?, must_exit?}
-#                     where each gate carries any subset of:
+# Per-entry shape (see `system-models/README.md` for the authoritative
+# schema and the vendored script's docstring for full field semantics):
+#   id              — short slug, kebab-case
+#   description     — one-line semantic intent
+#   models          — list of {file, asserts: [name, ...]}
+#   code_gates      — list of {file, must_call?, must_match?, must_exit?}
 #                       must_call:  AST-checked function-name reference
 #                       must_match: regex search on file contents
 #                       must_exit:  literal `return N` / `sys.exit(N)`
 #                     A gate passes when ALL its present checks pass.
-#   skill_texts   — list of {file, must_mention: [phrase, ...]}
-#   tests         — list of golden test names (G##); each must be defined
-#                     in tests/integration/test_golden.py
+#   closure_gates   — (optional) AST-walk every call site of a protected
+#                     primitive; demand a gate in same enclosing function.
+#   skill_texts     — list of {file, must_mention: [phrase, ...]}
+#   tests           — list of full Python test function names (e.g.
+#                     g56_parent_finish_blocked_while_children_pending);
+#                     resolved against tests_glob (default tests/**/test_*.py).
 #
-# Run `python3 system-models/check_enforcement.py` (from repo root) to
-# verify every entry. Exit 0 → all green. Exit non-zero → see report.
+# Run (from repo root):
+#   python3 system-models/scripts/check_enforcement.py \
+#       system-models/enforcement.yaml --project-root . [--check-coverage]
+# Exit 0 → all green. Exit non-zero → per-property red/green table.
 
 # =====================================================================
 # planning.als — core protocol
