@@ -16,7 +16,8 @@ module planning
         startClaim(a, t)   ~ executing.py reads "new" and prepares the append
         commitClaim(x)     ~ x's append wins the chain-head compare-and-swap
         abortClaim(x)      ~ x's append loses; hashharness's chain_predecessor
-                             check on `prevStatus` rejects it with 'head moved'
+                             gate on `prevStatus` rejects with 'head moved' (this
+                             guard lives in the storage layer, not in the model)
     - Single-step "atomic" transitions assume serialized linearization of
       append events (one append per step). Concurrent appends are modeled
       as overlapping startClaim attempts that resolve via commit/abort.

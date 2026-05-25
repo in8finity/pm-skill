@@ -96,15 +96,27 @@ def model_has_assert(als_path: Path, assert_name: str) -> bool:
 
 
 def test_exists(tests_path: Path, test_name: str) -> bool:
-    """True if a function `def g<digits>...` matching `test_name`
-    appears in the goldens file. Handles sub-case suffixes (G46s →
-    matches `g46_sticky_rebinding...` because the trailing letter is
-    a sub-case marker, not part of the canonical name)."""
+    """True if a Python `def` matching ``test_name`` appears in the
+    goldens file. Accepts two forms:
+
+      * Short ID (e.g. ``G80``, ``G46s``) — matches ``def g80...`` /
+        ``def g46...``. Sub-case suffix letters (G46s) are treated as
+        markers, not part of the canonical name.
+      * Full function name (e.g. ``g80_pull_writes_...``) — matches
+        ``def g80_pull_writes_...`` or ``def test_g80_pull_writes_...``.
+        This is the form the bundled formal-modeling
+        ``check_enforcement.py`` consumes, so YAMLs that use full
+        names work in BOTH checkers."""
+    # Short-ID form (legacy).
     m = re.match(r"^[Gg](\d+)([a-z]*)$", test_name)
-    if not m:
-        return False
-    n = m.group(1)
-    pat = rf"\bdef\s+g{n}[a-z_][a-z0-9_]*\s*\("
+    if m:
+        n = m.group(1)
+        pat = rf"\bdef\s+g{n}[a-z_][a-z0-9_]*\s*\("
+        if grep(tests_path, pat, regex=True):
+            return True
+    # Full-name form (matches the bundled checker's behavior).
+    n = re.escape(test_name)
+    pat = rf"def\s+(?:test_)?{n}\s*\("
     return grep(tests_path, pat, regex=True)
 
 
