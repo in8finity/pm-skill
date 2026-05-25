@@ -2393,6 +2393,131 @@ def g87_cross_queue_cancel_cascade_reaches_child() -> None:
                   f"G87 task {t[:8]} must be rejected after cross-queue cascade")
 
 
+def g91_report_files_extracts_affected_block() -> None:
+    """G91: `pm report-files --task SHA` parses the `## Affected files`
+    block out of the latest report. Verifies: bullet form, bare-line
+    form, comment lines ignored, no-block returns empty. Foundation
+    for script-path verifiers that fan out a gate over the files the
+    worker touched (feedback/verifier-attestation-reliability-2026-
+    05-25.md)."""
+    q = fresh_queue("g91")
+    t = json.loads(pm("plan", "--queue", q, "--title", "T", "--text", "x",
+                      env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    pm("executing", "--task", t)
+    body = (
+        "## Summary\n\nWork done.\n\n"
+        "## Affected files\n\n"
+        "- src/foo.py\n"
+        "  src/bar.py\n"
+        "# comment line — ignored\n"
+        "\n"
+        "- src/baz.py\n\n"
+        "## Next steps\n\n- nothing\n"
+    )
+    pm("report", "--task", t, "--title", "round 1", "--text", "-",
+       stdin=body)
+
+    # default — latest report, newline-separated
+    out = pm("report-files", "--task", t).stdout.strip()
+    assert_eq(out.splitlines(),
+              ["src/foo.py", "src/bar.py", "src/baz.py"],
+              "G91 default output")
+
+    # --json
+    out_json = json.loads(pm("report-files", "--task", t, "--json").stdout)
+    assert_eq(out_json, ["src/foo.py", "src/bar.py", "src/baz.py"],
+              "G91 --json output")
+
+    # second report without an Affected files block — latest is empty
+    pm("report", "--task", t, "--title", "round 2", "--text", "-",
+       stdin="## Summary\n\nNo block here.\n")
+    assert_eq(pm("report-files", "--task", t).stdout, "",
+              "G91 latest report with no block must produce empty output")
+
+    # --all-reports union (deduped, in order)
+    out_all = pm("report-files", "--task", t, "--all-reports").stdout.strip()
+    assert_eq(out_all.splitlines(),
+              ["src/foo.py", "src/bar.py", "src/baz.py"],
+              "G91 --all-reports union across rounds")
+
+
+def g92_script_path_verifier_uses_report_files() -> None:
+    """G92: end-to-end exercise of the script-path verifier convention.
+    A real verifier script reads `pm report-files` and gates on whether
+    each declared file passes a sentinel check. Pass case: every file
+    contains the magic string → exit 0 → `pm finished` accepts.
+    Fail case: one file is missing the string → script exits 1 →
+    `pm finished` exits 9 and the task stays in `working`.
+
+    Locks in: PM_TASK / PM_REPORT_SHA env wiring + the verifier
+    actually running (not self-attesting). Closes the failure mode
+    in feedback/verifier-attestation-reliability-2026-05-25.md by
+    proving the script-path form is wired correctly."""
+    q = fresh_queue("g92")
+    tmpdir = Path(tempfile.mkdtemp(prefix="g92-"))
+    try:
+        # Build a verifier script that reads `pm report-files` and
+        # greps each named file for "MAGIC".
+        verifier_path = tmpdir / "verifier.sh"
+        verifier_path.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -e\n"
+            f"files=$({PM} report-files --task \"$PM_TASK\" --report \"$PM_REPORT_SHA\")\n"
+            "rc=0\n"
+            "while IFS= read -r f; do\n"
+            "  [[ -z \"$f\" ]] && continue\n"
+            "  grep -q MAGIC \"$f\" || rc=1\n"
+            "done <<< \"$files\"\n"
+            "exit $rc\n"
+        )
+        verifier_path.chmod(0o755)
+
+        good = tmpdir / "good.txt"
+        good.write_text("contains MAGIC\n")
+        bad = tmpdir / "bad.txt"
+        bad.write_text("nope\n")
+
+        # --- happy path: report names only `good`, verifier passes ---
+        t_pass = json.loads(pm(
+            "plan", "--queue", q, "--title", "pass",
+            "--text", "verify good file",
+            "--verifier", str(verifier_path),
+            env_extra={"PM_WORKDIR": ""},
+        ).stdout)["task"]["text_sha256"]
+        pm("executing", "--task", t_pass)
+        pm("report", "--task", t_pass, "--title", "ok", "--text", "-",
+           stdin=f"## Affected files\n\n- {good}\n")
+        # pm finished runs the verifier; should pass with exit 0.
+        p = pm("finished", "--task", t_pass, check=False)
+        assert_eq(p.returncode, 0,
+                  f"G92 happy-path pm finished must succeed (verifier "
+                  f"exit 0); got {p.returncode}\nstderr: {p.stderr}")
+        assert_eq(store.status_value(store.latest_status(t_pass)), "done",
+                  "G92 happy-path task must close to done")
+
+        # --- fail path: report names `bad`, verifier exits 1 ---
+        t_fail = json.loads(pm(
+            "plan", "--queue", q, "--title", "fail",
+            "--text", "verify bad file",
+            "--verifier", str(verifier_path),
+            env_extra={"PM_WORKDIR": ""},
+        ).stdout)["task"]["text_sha256"]
+        pm("executing", "--task", t_fail)
+        pm("report", "--task", t_fail, "--title", "claimed-pass", "--text", "-",
+           stdin=f"## Affected files\n\n- {bad}\n")
+        # Worker's report is a LIE — the verifier script will run and
+        # find that bad.txt lacks MAGIC. pm finished must refuse.
+        p = pm("finished", "--task", t_fail, check=False)
+        assert_eq(p.returncode, 9,
+                  f"G92 fail-path pm finished must exit 9 (verifier "
+                  f"non-zero); got {p.returncode}\nstderr: {p.stderr}")
+        assert_eq(store.status_value(store.latest_status(t_fail)), "working",
+                  "G92 fail-path task must stay in working")
+    finally:
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def g89_cross_queue_child_blocked_until_parent_claimed() -> None:
     """G89: a child on queue B whose parent lives on queue A and is
     still `new` must NOT be claimable. Previously the per-queue
@@ -2580,6 +2705,8 @@ ALL_FLOWS = {
     "G88": g88_cross_queue_reclaim_cascade_reaches_child,
     "G89": g89_cross_queue_child_blocked_until_parent_claimed,
     "G90": g90_cross_queue_child_runnable_once_parent_claimed,
+    "G91": g91_report_files_extracts_affected_block,
+    "G92": g92_script_path_verifier_uses_report_files,
 }
 
 

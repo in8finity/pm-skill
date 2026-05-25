@@ -73,6 +73,100 @@ description: >
   Closes the "hollow proof-of-work" gap — see
   `system-models/reports/planning-blind-spots.md` #3.
 
+  #### Self-attestation caveats
+
+  The `skill:` and `prompt:` forms **trust the worker's report**.
+  `pm finished` parses the attestation block, gates on the verdict,
+  and does NOT re-run anything. This is fast and structurally clean
+  for criteria that genuinely require LLM judgement (prose quality,
+  citation grounding, semantic correctness) — re-judging on a
+  separate context is wasteful when the worker who did the work
+  already has the evidence at hand.
+
+  But it has a serious failure mode: **if the worker's "check"
+  silently fails or returns a misleading result, `pm finished`
+  accepts the lie.** Observed cause in practice: a sub-agent's bash
+  allowlist permits relative paths (`Bash(it-tools/scripts/*.sh *)`)
+  but not absolute paths; the worker invokes the gate via an
+  absolute path; the sandbox refuses; the worker's exit-code
+  handling mis-classifies the denial as success; the attestation
+  block records `verdict: PASS` while the gate was never actually
+  green. See
+  `feedback/verifier-attestation-reliability-2026-05-25.md` for the
+  source incident.
+
+  **Rule of thumb.** For *mechanical* gates — validators, schema
+  checks, banlist sweeps, anything where the criterion is a
+  deterministic script — prefer the **script-path** verifier form
+  (`<absolute path>`). `pm finished` actually executes the script,
+  so worker mis-attestation is structurally impossible. Reserve
+  `skill:`/`prompt:` for criteria that genuinely need LLM
+  judgement. When `skill:`/`prompt:` is the right tool but trust
+  matters, escalate to `verify-skill:`/`verify-prompt:` for an
+  independent re-judge subprocess.
+
+  #### Script-path verifiers: the `## Affected files` convention
+
+  Mechanical gates usually apply to one or more files the worker
+  touched. The verifier needs to know which. The convention is:
+  **the worker's TaskReport carries a `## Affected files` block,
+  and the verifier script reads it via `pm report-files`.**
+
+  Report shape (bulleted or bare; comments and blank lines OK):
+
+  ```markdown
+  ## Summary
+
+  Cleaned the rationale prose for `movement-control.yaml`.
+
+  ## Affected files
+
+  - sources/walton/latash-2010/ideas-and-claims/movement-control.yaml
+  - sources/walton/latash-2010/ideas-and-claims/synergies.yaml
+  # paths are repo-root-relative
+
+  ## Verifier Attestation
+
+  verifier: /Users/me/it-tools/scripts/check-rationale-banlist.sh
+  verdict: PASS
+  evidence: pm report-files | xargs -I{} check-rationale-banlist.sh {}
+  ```
+
+  Verifier script (passed to `pm plan --verifier`):
+
+  ```bash
+  #!/usr/bin/env bash
+  # check-rationale-banlist.sh — script-path verifier for `pm finished`
+  set -e
+  files=$(skills/pm/scripts/pm report-files --task "$PM_TASK" \
+          --report "$PM_REPORT_SHA")
+  rc=0
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    it-tools/scripts/banlist-impl.sh "$f" || rc=1
+  done <<< "$files"
+  exit $rc
+  ```
+
+  `pm finished` runs this with `PM_TASK` / `PM_REPORT_SHA` /
+  `PM_QUEUE` / `PM_SLUG` / `PM_VERIFIER` in env. The verifier reads
+  the report, fans the gate out over each affected file, returns
+  exit 0 only if every file passes. The worker cannot fabricate
+  this — there's no attestation block; the actual gate runs.
+
+  **When the worker iterates** (multiple reports on the same task
+  before `pm finished`), the verifier can either:
+    - read the **latest** report (default of `pm report-files
+      --task SHA` — typical), OR
+    - union across **all** reports with
+      `pm report-files --task SHA --all-reports`. Use when files
+      accumulated across rounds and you want to re-gate every one.
+
+  Output forms of `pm report-files`:
+    - default — one path per line
+    - `--null` — NUL-separated, `xargs -0`-friendly
+    - `--json` — JSON array
+
 ## Procedure
 
 1. Ensure the schema is registered (run once per data dir):
