@@ -68,10 +68,29 @@ def main() -> int:
         # Self-heal: if a previous run created the Task but crashed before
         # appending the genesis status, finish the job idempotently instead
         # of erroring out.
+        #
+        # Under concurrency the heal's outer "latest_status is None"
+        # check can TOCTOU against a peer's just-landed genesis: between
+        # our outer read (None) and append_status's inner read, the peer
+        # appends their genesis, and we'd otherwise crash with an
+        # uncaught HeadMoved (exit 1 traceback) or — worse — chain a
+        # SECOND TaskStatus(new) onto the peer's genesis (exit 0 but
+        # chain length 2, both attributes.status=='new'). We treat the
+        # HeadMoved as "the peer beat me on the genesis CAS — slug is
+        # really taken" and emit the canonical slug-taken refusal.
         if store.latest_status(existing["text_sha256"]) is None:
-            status = store.append_status(
-                existing["text_sha256"], "new", note=f"enqueued: {args.title}",
-            )
+            try:
+                status = store.append_status(
+                    existing["text_sha256"], "new",
+                    note=f"enqueued: {args.title}",
+                    force_no_prev=True,
+                )
+            except store.HeadMoved:
+                sys.stderr.write(
+                    f"slug '{slug}' was claimed concurrently in queue "
+                    f"'{args.queue}' — peer beat us on the genesis chain\n"
+                )
+                return 4
             print(json.dumps({"task": existing, "status": status, "healed": True}, indent=2))
             return 0
         sys.stderr.write(f"slug '{slug}' already exists in queue '{args.queue}'\n")
@@ -169,7 +188,24 @@ def main() -> int:
         )
         return 4
     # Genesis status: new
-    status = store.append_status(task["text_sha256"], "new", note=f"enqueued: {args.title}")
+    # Genesis write — force_no_prev=True so a racing heal can never wedge
+    # itself between create_task and this append. The backend's
+    # chain_predecessor CAS rejects the loser cleanly (HeadMoved →
+    # downstream callers see exit 4). Closes
+    # planning_plan_race.als#NewStatusUnique.
+    try:
+        status = store.append_status(task["text_sha256"], "new",
+                                     note=f"enqueued: {args.title}",
+                                     force_no_prev=True)
+    except store.HeadMoved:
+        # A racing heal added its own genesis between our create_task
+        # commit and this append. The peer effectively healed our just-
+        # created Task; the slug-taken refusal is the right outcome.
+        sys.stderr.write(
+            f"slug '{slug}' was healed concurrently in queue '{args.queue}' — "
+            f"peer beat us on the genesis chain\n"
+        )
+        return 4
     print(json.dumps({"task": task, "status": status}, indent=2))
     return 0
 

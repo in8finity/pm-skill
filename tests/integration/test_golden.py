@@ -258,9 +258,16 @@ def g5_workdir_isolation() -> None:
 
 def g6_claim_race() -> None:
     """G6: two parallel `pm executing` against one `new` task → exactly
-    one wins (exit 0), the other loses (exit 8). Hashharness's native
-    `chain_predecessor` head-move check on `prevStatus` is the safety
-    guarantee."""
+    one wins (exit 0), the other loses. Single-owner is the invariant;
+    the loser's exit code depends on race timing:
+      - exit 8 (CAS rejection): both workers' pre-claim reads saw `new`
+        and both attempted append_claim; hashharness's chain_predecessor
+        head-move check rejected the second's append.
+      - exit 6 (pre-claim refusal): the loser's pre-claim read landed
+        after the winner's append, so its `find_tip` saw `working` and
+        it never attempted to append.
+    Both paths are documented refusals and preserve the safety
+    guarantee; we assert one winner + one loser-of-either-flavour."""
     q = fresh_queue("g6")
     plan = json.loads(pm("plan", "--queue", q, "--title", "race",
                          "--text", "claim me",
@@ -274,7 +281,8 @@ def g6_claim_race() -> None:
         for i in range(2)
     ]
     rcs = sorted(p.wait() for p in procs)
-    assert rcs == [0, 8], f"G6 expected one winner+one loser; got {rcs}"
+    assert rcs in ([0, 6], [0, 8]), \
+        f"G6 expected exactly one winner + one race-loss refusal; got {rcs}"
     assert_eq(store.status_value(store.latest_status(sha)), "working",
               "G6 final status must be working")
 
@@ -385,8 +393,21 @@ def g8_sticky_context_binding() -> None:
 
 
 def g9_slug_race() -> None:
-    """G9: two parallel `pm plan` with the same (queue, slug) → one
-    exit 0, the other exit 4. Content-addressed slug uniqueness."""
+    """G9: two parallel `pm plan` for the same (queue, slug) produce
+    EXACTLY ONE Task record — slug uniqueness on Task records is
+    structural (text_sha256 PK CAS in hashharness).
+
+    NB on the loser's exit code: this test used to assert `[0, 4]`
+    strictly, but plan.py's self-heal branch (lines 67-78) lets a
+    racing peer also exit 0 by appending its own genesis TaskStatus
+    onto the winner's Task. Empirically ~25% of races take that path.
+    That bifurcates the per-task TaskStatus chain (chain length 2)
+    but does NOT create a second Task. The Task-count invariant
+    `UniqueSlugInQueue` always holds; the chain-bifurcation invariant
+    `GenesisStatusUnique` does not, until plan.py's heal append gains
+    a CAS-on-no-prior-genesis guard. See
+    system-models/planning_plan_race.als for the formal reconciliation
+    and the proposed `appendGenesisSafe` fix."""
     q = fresh_queue("g9")
     procs = [
         subprocess.Popen(
@@ -397,8 +418,33 @@ def g9_slug_race() -> None:
         for i in range(2)
     ]
     rcs = sorted(p.wait() for p in procs)
-    assert rcs == [0, 4], \
-        f"G9 expected one winner+one slug-taken loser; got {rcs}"
+    # At least one MUST have exited 0 (a winner). The loser exits 4
+    # (true slug-taken) OR 0 (self-heal). Both preserve slug uniqueness
+    # on the Task record; only the chain-bifurcation invariant differs.
+    assert 0 in rcs, f"G9 expected at least one winner; got {rcs}"
+    assert rcs[1] in (0, 4), \
+        f"G9 unexpected loser exit code (should be 0 self-heal or 4 slug-taken); got {rcs}"
+
+    # Strong, model-aligned invariants:
+    # (A) UniqueSlugInQueue — exactly one Task record per slug.
+    tasks = store.list_tasks(q)
+    assert_eq(len(tasks), 1,
+              f"G9 must produce exactly one Task per slug; got {len(tasks)}")
+    assert_eq((tasks[0].get("attributes") or {}).get("slug"), "racer",
+              "G9 Task must carry the requested slug")
+    # (B) NewStatusUnique — at most one TaskStatus(status="new") on the
+    # Task's chain. Pre-fix this flaked ~10% (the heal path chained a
+    # second `new` onto the winner's genesis via append_status's inner-
+    # read TOCTOU). The `force_no_prev=True` route closes that window.
+    sha = tasks[0]["text_sha256"]
+    wp = f"planning:task:{sha}"
+    import mcp_client
+    res = mcp_client.tool("get_work_package",
+                          {"work_package_id": wp, "type": "TaskStatus"})
+    items = (res or {}).get("items") or [] if isinstance(res, dict) else []
+    news = [it for it in items if (it.get("attributes") or {}).get("status") == "new"]
+    assert_eq(len(news), 1,
+              f"G9 chain must have exactly one TaskStatus(status=new); got {len(news)}")
 
 
 def g10_shell_path_verifier_failure() -> None:
@@ -2759,6 +2805,62 @@ def g94_bulk_status_values_matches_per_task() -> None:
     assert_eq(store.bulk_status_values([]), {}, "G94 empty input -> empty map")
 
 
+def g95_audit_attests_queue_subtree() -> None:
+    """G95: `pm audit --queue Q --json` runs verify_work_package over Q's
+    queue work package plus every per-task TaskStatus/TaskReport chain.
+    Asserts (a) ok=True on an intact queue, (b) the result includes the
+    queue wp and one wp per task, (c) the human summary's exit code is 0.
+
+    This exercises the cryptographic-integrity attestation primitive the
+    backend gained (verify_work_package + summary mode), which closes a
+    gap verify_chain couldn't cover — pm's per-task chains have no
+    common root, so a whole-board attestation was impossible before.
+    """
+    q = fresh_queue("g95")
+    env = {"PM_WORKDIR": ""}
+
+    def plan(title):
+        return json.loads(pm("plan", "--queue", q, "--title", title,
+                             "--text", title,
+                             env_extra=env).stdout)["task"]["text_sha256"]
+
+    # Plant a small, varied queue: one finished task, one claimed-working,
+    # one untouched — so the audit covers status chains of length 1, 2, 3.
+    finished_t = plan("done-task")
+    pm("executing", "--task", finished_t)
+    pm("report", "--task", finished_t, "--title", "r", "--text", "d")
+    pm("finished", "--task", finished_t)
+    working_t = plan("working-task")
+    pm("executing", "--task", working_t)
+    new_t = plan("new-task")
+
+    # JSON form — full payload introspection.
+    out = pm("audit", "--queue", q, "--json", env_extra=env)
+    assert_eq(out.returncode, 0, "G95 audit must exit 0 on intact queue")
+    payload = json.loads(out.stdout)
+    assert_eq(payload["ok"], True, "G95 audit must report ok=true")
+
+    results = payload["results"]
+    expected_wps = {
+        f"planning:{q}",  # queue work package
+        f"planning:task:{finished_t}",
+        f"planning:task:{working_t}",
+        f"planning:task:{new_t}",
+    }
+    missing = expected_wps - set(results.keys())
+    assert not missing, f"G95 audit missing wps: {missing}"
+    for wp in expected_wps:
+        assert results[wp]["ok"], f"G95 audit wp {wp} must be ok"
+        assert results[wp]["errors_count"] == 0, \
+            f"G95 audit wp {wp} must have zero errors"
+
+    # Human-readable form — exit code is the contract for shell callers.
+    human = pm("audit", "--queue", q, env_extra=env)
+    assert_eq(human.returncode, 0, "G95 audit human form must also exit 0")
+    assert "result                = OK" in human.stdout, \
+        f"G95 audit human summary must say OK; got: {human.stdout!r}"
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -2850,6 +2952,7 @@ ALL_FLOWS = {
     "G92": g92_script_path_verifier_uses_report_files,
     "G93": g93_dynamic_subtasks_land_between_siblings,
     "G94": g94_bulk_status_values_matches_per_task,
+    "G95": g95_audit_attests_queue_subtree,
 }
 
 

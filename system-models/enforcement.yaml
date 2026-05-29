@@ -224,7 +224,7 @@
 # =====================================================================
 
 - id: unique_slug_in_queue
-  description: at every moment, no two pending tasks share a slug (content-addressed via task:queue/slug).
+  description: at every moment, no two Task records in the same queue share a slug (content-addressed via task:queue/slug; structural via text_sha256 PK).
   models:
     - file: system-models/planning_plan_race.als
       asserts: [UniqueSlugInQueue]
@@ -240,6 +240,34 @@
       must_mention: ["slug", "text_sha256"]
     - file: skills/pm/scripts/plan.py
       must_mention: ["slug", "concurrently"]
+  tests: [g9_slug_race]
+
+# Sibling invariant on the same model — the chain-content state-
+# machine property: at most one TaskStatus(status="new") per Task chain
+# ever. Enforced by hashharness's chain_predecessor CAS on a write with
+# no prevStatus link (rejects if the head already exists). Wired in
+# code via `force_no_prev=True` at every genesis call site in plan.py
+# + the matching `force_no_prev` param on `store.append_status`. See
+# `system-models/planning_plan_race.als` for the historical pre-fix
+# narrative and the swap-to-reproduce comment block.
+- id: new_status_unique
+  description: each Task has at most one TaskStatus with status="new" across its entire chain (no concurrent-heal duplication).
+  models:
+    - file: system-models/planning_plan_race.als
+      asserts: [NewStatusUnique]
+  code_gates:
+    - file: skills/pm/scripts/plan.py
+      must_match: 'force_no_prev=True'
+    - file: skills/pm/scripts/plan.py
+      must_match: 'except store\.HeadMoved'
+      must_exit: 4
+    - file: skills/pm/scripts/store.py
+      must_match: 'force_no_prev'
+  skill_texts:
+    - file: skills/pm/scripts/plan.py
+      must_mention: ["force_no_prev", "HeadMoved", "genesis"]
+    - file: skills/pm/scripts/store.py
+      must_mention: ["force_no_prev", "chain_predecessor", "genesis"]
   tests: [g9_slug_race]
 
 # =====================================================================

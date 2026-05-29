@@ -29,6 +29,7 @@
 #   pm install-codex-skill [-- args for install_codex_skill.sh — vendor the pm skill bundle into ~/.codex/skills]
 #   pm extract-steps   [-- args for extract_skill_steps.sh — semantic step extraction with validation]
 #   pm limits          [-- args for limits.py — read rate-limit cache, decide spawn/wait/stop]
+#   pm audit           [-- args for audit.py — cryptographic integrity attestation of a queue / the whole board]
 #   pm smoke-test      [-- args for smoke_test.sh — minimal end-to-end backend sanity check]
 #
 # Any further args are forwarded verbatim to the underlying script. The
@@ -74,14 +75,15 @@ case "${1:-}" in
   install-codex-skill) shift; exec "$DIR/install_codex_skill.sh" "$@" ;;
   extract-steps) shift; exec "$DIR/extract_skill_steps.sh" "$@" ;;
   limits)     shift; exec "$DIR/limits.py" "$@" ;;
+  audit)      shift; exec "$DIR/audit.py" "$@" ;;
   smoke-test) shift; exec "$DIR/smoke_test.sh" "$@" ;;
   ""|-h|--help)
-    sed -n '2,32p' "$0"
+    sed -n '2,33p' "$0"
     exit 0
     ;;
   *)
     echo "pm: unknown subcommand '$1'" >&2
-    sed -n '2,32p' "$0" >&2
+    sed -n '2,33p' "$0" >&2
     exit 64
     ;;
 esac

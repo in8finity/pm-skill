@@ -226,6 +226,72 @@ def bulk_status_values(task_shas: list[str]) -> dict[str, str | None]:
     return out
 
 
+def open_task_shas(queue: str, status: str = "new",
+                   tasks: list[dict[str, Any]] | None = None) -> set[str]:
+    """Return the set of task ``text_sha256`` whose CURRENT TaskStatus value
+    equals ``status``, scoped to ``queue``. One ``find_tips_where`` round
+    trip; the backend uses a tip-attribute index, so cost is O(matching),
+    independent of how much terminal history the queue has accumulated.
+
+    This is the O(open work) replacement for "bulk-fetch every status,
+    filter `!= new`" — what made ``pm next`` / ``pm pull`` candidate
+    discovery scale with all-tasks-ever instead of with the runnable set.
+    Callers still need non-``new`` statuses for the dep / parent gates;
+    resolve those with a targeted ``bulk_status_values`` over just the
+    deps and parents of the candidates that survive here.
+
+    ``tasks`` is an optional pre-fetched ``list_tasks(queue)`` result so a
+    caller that already has it (e.g. ``next.py``) doesn't pay for a second
+    fetch. When omitted the helper fetches its own.
+    """
+    if tasks is None:
+        tasks = list_tasks(queue)
+    if not tasks:
+        return set()
+    wps = [task_wp(t["text_sha256"]) for t in tasks]
+    res = mcp_client.tool(
+        "find_tips_where",
+        {"type": "TaskStatus",
+         "where_attributes": {"status": status},
+         "work_package_ids": wps,
+         "fields": ["work_package_id"]},
+    )
+    tips = (res or {}).get("tips") if isinstance(res, dict) else None
+    tips = tips or {}
+    prefix = "planning:task:"
+    return {wp[len(prefix):] for wp in tips.keys() if wp.startswith(prefix)}
+
+
+def latest_status_if_new(task_sha: str) -> dict[str, Any] | None:
+    """Return the task's current ``TaskStatus`` tip IF and ONLY IF its
+    ``attributes.status == "new"`` — in a single round trip via
+    ``find_tip``'s ``where_attributes`` predicate.
+
+    Used by the pre-claim path (``pm executing`` / ``pm pull``) where the
+    only thing the caller cares about is "is this still ``new``, and if
+    so what's the ``record_sha256`` for the CAS prev-link?" The old
+    ``latest_status(...)`` + status-equality check took two round trips
+    (``find_tip`` minimal projection then ``get_item_by_hash`` rehydrate
+    for the attribute). This collapses to one.
+
+    Returns ``None`` when the tip's status doesn't match — the backend
+    surfaces that as a sentinel string from ``mcp_client.tool``, so we
+    treat any non-dict result as "no match". Use ``latest_status`` (full
+    record) when the caller needs the chain's CURRENT status whatever
+    it happens to be — e.g. diagnostics on the exit-6 refusal path.
+    """
+    res = mcp_client.tool(
+        "find_tip",
+        {"work_package_id": task_wp(task_sha),
+         "type": "TaskStatus",
+         "where_attributes": {"status": "new"},
+         "fields": ["record_sha256", "attributes"]},
+    )
+    if isinstance(res, dict) and res.get("record_sha256"):
+        return res
+    return None
+
+
 def latest_report(task_sha: str) -> dict[str, Any] | None:
     return _normalize_tip(mcp_client.tool(
         "find_tip",
@@ -458,6 +524,7 @@ def append_status(
     proof_report_sha: str | None = None,
     extra_attrs: dict[str, Any] | None = None,
     expected_prev_status_sha: str | None = None,
+    force_no_prev: bool = False,
 ) -> dict[str, Any]:
     """Append a TaskStatus chained off the current tip.
 
@@ -475,11 +542,29 @@ def append_status(
     the second write chained off ``working``, producing a duplicate
     claim. With the caller's verified prev pinned, the CAS rejects
     if the head has moved between read and write.
+
+    ``force_no_prev``: assert that this is a GENESIS write — submit with
+    no ``prevStatus`` link, skip the internal ``latest_status`` read,
+    and let the backend's chain_predecessor CAS reject if any prior
+    status exists for this task. Use this from plan.py's two genesis
+    call sites (the normal create→append flow AND the self-heal flow);
+    it eliminates the inner-read TOCTOU where a late inner read sees a
+    racing peer's genesis and chains a second ``TaskStatus(status=new)``
+    on top of it — the bug captured by
+    ``system-models/planning_plan_race.als``'s ``NewStatusUnique``
+    invariant.
     """
     if status not in VALID_STATUSES:
         raise ValueError(f"invalid status: {status}; expected one of {VALID_STATUSES}")
-    if expected_prev_status_sha is not None:
-        prev_record_sha: str | None = expected_prev_status_sha
+    if force_no_prev:
+        if expected_prev_status_sha is not None:
+            raise ValueError(
+                "append_status: force_no_prev and expected_prev_status_sha "
+                "are mutually exclusive — genesis writes have no prev by definition"
+            )
+        prev_record_sha: str | None = None
+    elif expected_prev_status_sha is not None:
+        prev_record_sha = expected_prev_status_sha
     else:
         prev = latest_status(task_sha)
         prev_record_sha = prev["record_sha256"] if prev else None

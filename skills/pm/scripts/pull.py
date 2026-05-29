@@ -131,14 +131,32 @@ def main() -> int:
         # here is identical to what `pm next` would return.
         record_to_text = {t["record_sha256"]: t["text_sha256"] for t in tasks}
 
-        # One bulk tip lookup per attempt instead of one (two-round-trip)
-        # latest_status per task. This is the hottest path under fan-out:
-        # N workers each polling pull on a seasoned store was what pegged
-        # the single MCP server. Re-primed each retry attempt because a
-        # racing worker may have moved a tip since the last read.
-        status_cache: dict[str, str | None] = store.bulk_status_values(
-            [t["text_sha256"] for t in tasks]
-        )
+        # O(open) candidate discovery via the tip-attribute index — same
+        # shape as next.py. Re-primed each retry attempt because a racing
+        # worker may have moved a tip since the last read.
+        new_shas = store.open_task_shas(args.queue, status="new", tasks=tasks)
+        status_cache: dict[str, str | None] = {sha: "new" for sha in new_shas}
+
+        need_status: set[str] = set()
+        for t in tasks:
+            if t["text_sha256"] not in new_shas:
+                continue
+            for d in (t.get("links") or {}).get("dependsOn") or []:
+                dt = record_to_text.get(d)
+                if dt and dt not in status_cache:
+                    need_status.add(dt)
+            p = (t.get("links") or {}).get("parentTask")
+            if p:
+                pt = record_to_text.get(p)
+                if pt and pt not in status_cache:
+                    need_status.add(pt)
+        if need_status:
+            status_cache.update(store.bulk_status_values(list(need_status)))
+
+        # Restrict the iteration set to candidate `new` tasks for the
+        # same reason as next.py: terminal/working tasks can never be
+        # claimed, so paying any status fallback for them is waste.
+        tasks = [t for t in tasks if t["text_sha256"] in new_shas]
         ctx_cache: dict[str, set[str]] = {}
 
         def status_of(sha: str) -> str | None:
@@ -239,11 +257,15 @@ def main() -> int:
         # `working` chained off the first. The fresh status check
         # below closes that TOCTOU; on miss, we skip the candidate
         # without burning a retry attempt.
-        latest_before = store.latest_status(sha)
-        if latest_before is None or store.status_value(latest_before) != "new":
+        # One-round-trip recheck via find_tip's where_attributes filter:
+        # we only proceed if the tip is still `new` and we need only the
+        # CAS prev-link. The old path took two round trips (find_tip
+        # minimal + get_item_by_hash rehydrate for attributes.status).
+        matched_tip = store.latest_status_if_new(sha)
+        if matched_tip is None:
             skip.add(sha)
             continue
-        prev_record_sha = latest_before["record_sha256"]
+        prev_record_sha = matched_tip["record_sha256"]
         try:
             store.append_claim(
                 sha, agent_id, prev_record_sha,

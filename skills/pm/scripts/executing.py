@@ -76,33 +76,41 @@ def main() -> int:
     if args.agent is None:
         args.agent = default_agent_id(args.context_id)
 
-    latest_before = store.latest_status(args.task)
-    if latest_before is None:
-        # Distinguish "task doesn't exist" from "task exists but has no
-        # genesis TaskStatus yet". The first is a wrong/hallucinated sha
-        # (worker should give up and check input); the second is a
-        # transient genesis-read race (worker should retry once).
-        # Conflating them sends operators down the wrong recovery path.
-        if store.get_task(args.task) is None:
+    # Fast path: one find_tip with where_attributes={status:"new"} +
+    # fields=[record_sha256] gives us the CAS prev-link in a single round
+    # trip when the task is claimable. On non-match we fall back to the
+    # full latest_status path to surface the right diagnostic exit code
+    # (17 missing task / 16 orphan task / 6 wrong status) — those paths
+    # are rarer than the common "claim succeeds" path, so paying the
+    # extra round trip there is fine.
+    matched_tip = store.latest_status_if_new(args.task)
+    if matched_tip is not None:
+        prev_sha = matched_tip["record_sha256"]
+    else:
+        latest_before = store.latest_status(args.task)
+        if latest_before is None:
+            # Distinguish "task doesn't exist" from "task exists but has
+            # no genesis TaskStatus yet". The first is a wrong/hallucinated
+            # sha (worker should give up and check input); the second is a
+            # transient genesis-read race (worker should retry once).
+            # Conflating them sends operators down the wrong recovery path.
+            if store.get_task(args.task) is None:
+                sys.stderr.write(
+                    f"refusing: no Task with text_sha256={args.task[:12]} "
+                    f"found. Check your sha — typo or hallucinated reference. "
+                    f"Use `pm show --task <sha>` or look up by slug instead.\n"
+                )
+                return 17
             sys.stderr.write(
-                f"refusing: no Task with text_sha256={args.task[:12]} "
-                f"found. Check your sha — typo or hallucinated reference. "
-                f"Use `pm show --task <sha>` or look up by slug instead.\n"
+                f"refusing: task {args.task[:12]} exists but has no "
+                f"TaskStatus on the chain — likely a transient genesis-read "
+                f"race. Retry once; if it persists the task's chain is "
+                f"corrupt and needs operator inspection.\n"
             )
-            return 17
-        sys.stderr.write(
-            f"refusing: task {args.task[:12]} exists but has no "
-            f"TaskStatus on the chain — likely a transient genesis-read "
-            f"race. Retry once; if it persists the task's chain is "
-            f"corrupt and needs operator inspection.\n"
-        )
-        return 16
-    current = store.status_value(latest_before)
-    if current != "new":
+            return 16
+        current = store.status_value(latest_before)
         sys.stderr.write(f"refusing: task {args.task[:12]} status is '{current}', expected 'new'\n")
         return 6
-
-    prev_sha = latest_before["record_sha256"]
     agent_context = args.context_id or os.environ.get("PM_CONTEXT_ID") or None
 
     task = store.get_task(args.task)

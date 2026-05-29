@@ -56,14 +56,32 @@ def main() -> int:
     # status lookups off text_sha256, so build a one-shot translation.
     record_to_text = {t["record_sha256"]: t["text_sha256"] for t in tasks}
 
-    # Prime every in-queue task's current status in ONE bulk round trip
-    # instead of one (two-round-trip) latest_status per task — the hot
-    # path that made pm next O(N) on a seasoned store. status_of falls
-    # back to a single lookup for any sha not in the queue listing
-    # (e.g. a cross-queue dep/parent, which is rare).
-    status_cache: dict[str, str | None] = store.bulk_status_values(
-        [t["text_sha256"] for t in tasks]
-    )
+    # O(open) candidate discovery: ask the backend for only those tasks
+    # whose CURRENT status is `new`. With the tip-attribute index in
+    # hashharness, this scales with runnable work, not with total queue
+    # history — so a queue full of terminal `done`/`rejected`/`superseded`
+    # tasks no longer drags every call. Statuses for the deps and parents
+    # of those candidates (which may be in any state) are then resolved
+    # with one targeted bulk call below.
+    new_shas = store.open_task_shas(args.queue, status="new", tasks=tasks)
+    status_cache: dict[str, str | None] = {sha: "new" for sha in new_shas}
+
+    need_status: set[str] = set()
+    for t in tasks:
+        if t["text_sha256"] not in new_shas:
+            continue
+        for d in (t.get("links") or {}).get("dependsOn") or []:
+            dt = record_to_text.get(d)
+            if dt and dt not in status_cache:
+                need_status.add(dt)
+        p = (t.get("links") or {}).get("parentTask")
+        if p:
+            pt = record_to_text.get(p)
+            if pt and pt not in status_cache:
+                need_status.add(pt)
+    if need_status:
+        status_cache.update(store.bulk_status_values(list(need_status)))
+
     ctx_cache: dict[str, set[str]] = {}
 
     def status_of(sha: str) -> str | None:
@@ -95,6 +113,10 @@ def main() -> int:
             return 0
         return 0 if agent_context in required_ctx(sha) else 1
 
+    # Only `new` tasks can ever be runnable; everything else is filtered
+    # out of the loop entirely so we don't pay even one fallback status
+    # round trip for terminal/working tasks.
+    tasks = [t for t in tasks if t["text_sha256"] in new_shas]
     tasks.sort(key=lambda t: (context_priority(t), t.get("created_at", "")))
 
     def dep_done(d_record: str) -> bool:
