@@ -68,6 +68,19 @@ You are a planning worker. Repeat until the queue is empty:
    worker stops, same as before; only adopt the rc=$? pattern if you
    want the worker to push through transient contention.
 
+   STRICT-SANDBOX ALTERNATIVE (no `eval`, no `$(...)`-into-eval): use
+   `pm pull --json`, which prints a single JSON object (or `null` on
+   empty queue, `{"retries_lost": true}` on exit 8) instead of
+   shell-eval-able assignments. Parse the `task` / `idea_path` / `slug`
+   fields with your JSON tool of choice. Prefer this form on any
+   allowlist that blocks `eval` or command substitution — `eval` is the
+   single most common sandbox blocker for the worker loop.
+
+   DO NOT self-gate on `pm limits`. A sub-agent's `pm limits` read is
+   stale by construction (only the main session refreshes the cache),
+   and a stale read misread as "stop" will halt you with work left.
+   Budget is the orchestrator's job; you just drain to your task cap.
+
    `pm pull` is preferred over the split `pm next + pm executing`
    form below because it eliminates two failure modes structurally:
      - SHA hallucination: the worker never types or rebuilds the sha.
@@ -383,18 +396,43 @@ behavior — i.e. `--running` degrades gracefully rather than erroring.
 $ pm limits --json --reserve-weekly 20 --max-five-hour 95
 ```
 
+> **`--reserve-weekly` is headroom, not budget.** `--reserve-weekly 30`
+> means "leave 30% untouched → stop at **70% consumed**", not "use 30%".
+> The inversion trips people up; read it as *headroom left alone*.
+
 Exit codes (so the orchestrator can branch without parsing JSON):
 
-| code | status    | what it means                                       |
-|------|-----------|-----------------------------------------------------|
-| 0    | `ok`      | under all caps — safe to spawn                      |
-| 1    | `unknown` | cache missing / stale / malformed — caller decides  |
-| 2    | `stop`    | seven-day reserve breached — stop the run           |
-| 3    | `wait`    | five-hour cap hit — sleep `wait_seconds`            |
+| code | status    | what it means                                                  |
+|------|-----------|----------------------------------------------------------------|
+| 0    | `ok`      | under all caps — safe to spawn                                 |
+| 1    | `unknown` | source missing / malformed — no data at all, caller decides    |
+| 2    | `stop`    | seven-day reserve breached — stop the run                      |
+| 3    | `wait`    | five-hour cap hit — sleep `wait_seconds`                       |
+| 4    | `stale`   | source parsed but older than `--max-stale-sec` — UNENFORCEABLE, not a stop |
 
-If the orchestrator sees `unknown`, the safest call is to proceed with
-one batch and re-check after; the cache becomes fresh again on the very
-next statusline render (so within seconds of the next tool call).
+**`stale` (4) is deliberately distinct from `stop` (2) and `unknown`
+(1).** A stale read means "I found numbers but they're old" — it is NOT
+an over-budget signal. The would-be decision on the stale numbers is
+exposed as `fresh_status`, and `source_age_seconds` + the raw
+percentages are always included, so you can see "last-known weekly was
+1%, clearly safe to proceed" instead of collapsing to an ambiguous stop.
+Treating `stale`/`unknown` as "stop" is a footgun that has caused false
+work-stoppages with hundreds of tasks left.
+
+If the orchestrator sees `unknown` or `stale`, the safest call is to
+proceed with one batch and re-check after; the cache becomes fresh again
+on the very next statusline render (so within seconds of the next tool
+call in the main session).
+
+> **Budget is the orchestrator's job, never the worker's.** The
+> rate-limit cache is refreshed only by the **main session's**
+> statusline hook — a sub-agent's `pm limits` reads whatever the parent
+> last wrote, which goes `stale` fast during a long worker run. So:
+> **the orchestrator gates spawns on `pm limits` between batches;
+> sub-agent workers MUST NOT self-gate on `pm limits`** (their read is
+> stale by construction and a stale-as-stop misread halts the run). Give
+> workers a fixed per-batch task cap instead; the orchestrator owns the
+> budget loop.
 
 ### Controller loop (orchestrator behavior)
 
@@ -425,9 +463,14 @@ Each iteration:
        an hour, the controller will simply re-check, see `wait` again,
        and reschedule). Use the same `--running` prompt verbatim so
        the next firing re-enters this procedure.
-     - `1` (unknown): proceed but treat with caution. If two consecutive
-       iterations report `unknown`, surface to the user — the statusline
-       hook may not be installed.
+     - `1` (unknown): no data at all. Proceed but treat with caution. If
+       two consecutive iterations report `unknown`, surface to the user —
+       the statusline hook may not be installed.
+     - `4` (stale): numbers found but old. Read `fresh_status` and
+       `source_age_seconds` from the JSON. If `fresh_status` is `ok`
+       with comfortable headroom, proceed — a stale-but-safe read is not
+       a stop. The cache refreshes on the next statusline render, so the
+       reading self-heals within a turn or two in the main session.
      - `0` (ok): continue to step 2.
 
 2. **Census in-flight workers.** Count tasks the previous batch is

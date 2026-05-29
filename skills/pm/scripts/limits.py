@@ -12,9 +12,17 @@ Codex source:
 Exit codes (so callers can branch without parsing JSON):
 
   0 ok       — under all caps; safe to spawn workers
-  1 unknown  — source missing, stale, or malformed; caller decides
+  1 unknown  — source missing or malformed; budget is undeterminable
   2 stop     — seven-day usage breaches the reserve; stop spawning
   3 wait     — five-hour usage at/above max; sleep until reset
+  4 stale    — source found and parsed, but older than --max-stale-sec;
+               the budget signal is UNENFORCEABLE, not a stop. The
+               last-known decision is exposed as `fresh_status` and the
+               raw numbers + `source_age_seconds` are included so the
+               caller can judge for itself. Distinct from `unknown`
+               (no data at all) and from `stop` (real over-budget) on
+               purpose: a stale read silently treated as "stop" is a
+               footgun that has caused false work-stoppages.
 
 With --json, the decision payload is printed regardless of exit code.
 """
@@ -46,8 +54,11 @@ def main(argv: list[str] | None = None) -> int:
         "--reserve-weekly",
         type=float,
         default=20.0,
-        help="Stop spawning when seven-day usage exceeds (100 - RESERVE)%%. "
-             "Default 20 (i.e. cap at 80%% weekly usage).",
+        help="Headroom (in percentage points) to leave UNTOUCHED on the "
+             "seven-day bucket. Stop spawning when seven-day usage exceeds "
+             "(100 - RESERVE)%%. NOTE the inversion: --reserve-weekly 30 "
+             "means 'stop at 70%% consumed', not 'use 30%%'. Default 20 "
+             "(cap at 80%% weekly usage).",
     )
     ap.add_argument(
         "--max-five-hour",
@@ -70,9 +81,11 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     emit = (lambda d: print(json.dumps(d, indent=2))) if args.json else (lambda d: None)
-    snapshot, reason = load_snapshot(args.max_stale_sec, args.cache_path)
+    # Snapshots are loaded regardless of age — staleness is a separate
+    # axis from loadability, decided here, not buried in the loader.
+    snapshot, reason = load_snapshot(args.cache_path)
     if snapshot is None:
-        emit({"status": "unknown", "reason": reason})
+        emit({"status": "unknown", "reason": reason, "source_age_seconds": None})
         return 1
 
     decision = {
@@ -83,45 +96,81 @@ def main(argv: list[str] | None = None) -> int:
         "seven_day_pct": snapshot.seven_pct,
         "seven_day_reset_at": snapshot.seven_reset,
         "weekly_budget_left_pct": round(100.0 - snapshot.seven_pct, 2),
-        "cache_age_sec": snapshot.age_sec,
+        "cache_age_sec": snapshot.age_sec,        # kept for back-compat
+        "source_age_seconds": snapshot.age_sec,
+        "max_stale_sec": args.max_stale_sec,
         "reserve_weekly": args.reserve_weekly,
         "max_five_hour": args.max_five_hour,
     }
 
+    budget_status, budget_reason, wait_seconds = _classify(snapshot, args)
+    decision["wait_seconds"] = wait_seconds if wait_seconds is not None else 0
+    if budget_reason:
+        decision["reason"] = budget_reason
+
+    # A source that exists and parses but is older than the staleness
+    # threshold yields an UNENFORCEABLE signal — not a stop. Surface the
+    # would-be decision as `fresh_status` so the caller can still see
+    # "last-known weekly was 1%, clearly safe" rather than collapsing to
+    # an ambiguous "unknown" that a worker might (wrongly) read as stop.
+    if snapshot.age_sec > args.max_stale_sec:
+        decision["status"] = "stale"
+        decision["stale"] = True
+        decision["fresh_status"] = budget_status
+        decision["reason"] = (
+            f"source is {snapshot.age_sec}s old (> {args.max_stale_sec}s threshold); "
+            f"budget signal unenforceable. Last-known decision would be "
+            f"'{budget_status}'" + (f": {budget_reason}" if budget_reason else "") + "."
+        )
+        emit(decision)
+        return 4
+
+    decision["stale"] = False
+    decision["status"] = budget_status
+    emit(decision)
+    return {"ok": 0, "stop": 2, "wait": 3}[budget_status]
+
+
+def _classify(snapshot: Snapshot, args) -> tuple[str, str | None, int | None]:
+    """Pure budget decision on a snapshot, independent of staleness.
+    Returns (status, reason, wait_seconds)."""
     weekly_cap = 100.0 - args.reserve_weekly
     if snapshot.seven_pct >= weekly_cap:
-        decision["status"] = "stop"
-        decision["reason"] = (
+        return (
+            "stop",
             f"seven-day usage {snapshot.seven_pct:.1f}% >= cap {weekly_cap:.1f}% "
-            f"(reserve {args.reserve_weekly:.1f}%)"
+            f"(reserve {args.reserve_weekly:.1f}%)",
+            _delta_until(snapshot.seven_reset),
         )
-        decision["wait_seconds"] = _delta_until(snapshot.seven_reset)
-        emit(decision)
-        return 2
-
     if snapshot.five_pct >= args.max_five_hour:
         wait = _delta_until(snapshot.five_reset)
         if wait is None or wait <= 0:
             wait = 1800
-        decision["status"] = "wait"
-        decision["reason"] = f"five-hour usage {snapshot.five_pct:.1f}% >= {args.max_five_hour:.1f}%"
-        decision["wait_seconds"] = max(60, wait + 30)
-        emit(decision)
-        return 3
-
-    decision["status"] = "ok"
-    decision["wait_seconds"] = 0
-    emit(decision)
-    return 0
+        return (
+            "wait",
+            f"five-hour usage {snapshot.five_pct:.1f}% >= {args.max_five_hour:.1f}%",
+            max(60, wait + 30),
+        )
+    return "ok", None, 0
 
 
-def load_snapshot(max_stale_sec: int, cache_path: str | None = None) -> tuple[Snapshot | None, str]:
+def load_snapshot(cache_path: str | None = None) -> tuple[Snapshot | None, str]:
+    """Return the FRESHEST parseable snapshot across all candidate
+    sources. Staleness no longer disqualifies a source here — that
+    judgement is made by the caller against --max-stale-sec — but when
+    several sources exist we still prefer the youngest, so a fresh
+    lower-priority source wins over a stale higher-priority one."""
     reasons: list[str] = []
+    best: Snapshot | None = None
     for source, path in iter_candidate_paths(cache_path):
-        snapshot, reason = load_snapshot_from_path(path, max_stale_sec, source)
-        if snapshot is not None:
-            return snapshot, reason
-        reasons.append(reason)
+        snapshot, reason = load_snapshot_from_path(path, source)
+        if snapshot is None:
+            reasons.append(reason)
+            continue
+        if best is None or snapshot.age_sec < best.age_sec:
+            best = snapshot
+    if best is not None:
+        return best, ""
     if not reasons:
         return None, "no Claude or Codex rate-limit source found"
     return None, "; ".join(reasons)
@@ -188,14 +237,11 @@ def _latest_codex_session_paths(limit: int) -> list[Path]:
     return paths[:limit]
 
 
-def load_snapshot_from_path(path: Path, max_stale_sec: int, hinted_source: str) -> tuple[Snapshot | None, str]:
+def load_snapshot_from_path(path: Path, hinted_source: str) -> tuple[Snapshot | None, str]:
     if not path.exists():
         return None, f"{hinted_source} source missing: {path}"
 
     age = int(time.time() - path.stat().st_mtime)
-    if age > max_stale_sec:
-        return None, f"{hinted_source} source stale: {path} ({age}s old)"
-
     try:
         data = _read_source_payload(path)
         snap = _snapshot_from_payload(data, path, age, hinted_source)

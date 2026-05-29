@@ -68,6 +68,56 @@ class LimitsTest(unittest.TestCase):
         self.assertEqual(data["source"], "codex")
         self.assertEqual(data["seven_day_pct"], 85.0)
 
+    def test_stale_source_is_not_a_stop(self) -> None:
+        # Weekly ~1%, five-hour ~9% — clearly under budget. But the file
+        # is older than the staleness threshold, so the verdict must be
+        # `stale` (exit 4), NOT collapsed to `unknown` or read as `stop`.
+        now = int(time.time())
+        with tempfile.TemporaryDirectory() as td:
+            cache_path = Path(td) / "pm-rate-limits.json"
+            cache_path.write_text(json.dumps({
+                "rate_limits": {
+                    "five_hour": {"used_percentage": 9.0, "resets_at": now + 120},
+                    "seven_day": {"used_percentage": 1.0, "resets_at": now + 3600},
+                }
+            }))
+            old = now - 5000
+            os.utime(cache_path, (old, old))
+
+            rc, data = self.run_main(
+                "--json", "--cache-path", str(cache_path), "--max-stale-sec", "600"
+            )
+
+        self.assertEqual(rc, 4)
+        self.assertEqual(data["status"], "stale")
+        self.assertTrue(data["stale"])
+        self.assertEqual(data["fresh_status"], "ok")
+        self.assertGreaterEqual(data["source_age_seconds"], 600)
+
+    def test_missing_source_is_unknown_with_null_age(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            missing = Path(td) / "does-not-exist.json"
+            rc, data = self.run_main("--json", "--cache-path", str(missing))
+        self.assertEqual(rc, 1)
+        self.assertEqual(data["status"], "unknown")
+        self.assertIsNone(data["source_age_seconds"])
+
+    def test_fresh_source_reports_not_stale(self) -> None:
+        now = int(time.time())
+        with tempfile.TemporaryDirectory() as td:
+            cache_path = Path(td) / "pm-rate-limits.json"
+            cache_path.write_text(json.dumps({
+                "rate_limits": {
+                    "five_hour": {"used_percentage": 9.0, "resets_at": now + 120},
+                    "seven_day": {"used_percentage": 1.0, "resets_at": now + 3600},
+                }
+            }))
+            rc, data = self.run_main("--json", "--cache-path", str(cache_path))
+        self.assertEqual(rc, 0)
+        self.assertEqual(data["status"], "ok")
+        self.assertFalse(data["stale"])
+        self.assertIn("source_age_seconds", data)
+
     def test_auto_detects_current_codex_thread(self) -> None:
         now = int(time.time())
         thread_id = "019e56b6-b84d-71a2-927a-71fb598040ba"
