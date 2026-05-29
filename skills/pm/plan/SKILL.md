@@ -257,6 +257,51 @@ otherwise, listing the offending parent slugs. Bypass with
 `--allow-heavy-parent` for legacy / exceptional cases (and accept
 that you've taken the convention off the table for those parents).
 
+### Inserting work mid-execution — plan it as your own subtasks
+
+A task that, *while running*, discovers it needs more work done **before
+a downstream sibling** can run should plan that work as **its own
+subtasks** (`--parent <self>`), not as free tasks. You do **not** need
+to retro-edit the downstream task's `dependsOn` (and there's no verb to
+do so) — subtask nesting plus two existing gates enforce the ordering
+for free:
+
+- **rollup-at-finish**: the running task cannot reach `done` until every
+  descendant it just spawned is settled (`pm finished` exit 14).
+- **dependsOn**: a downstream task that depends on the running one stays
+  blocked until it is `done` — which now transitively requires the whole
+  freshly-planned subtree.
+
+```
+T1 ─▶ T2 ─▶ T3            (dependsOn chain, planned up front)
+        │
+        └─ while T2 is `working`, it plans:
+             T2a (--parent T2) ── T2a.1 / T2a.2 / T2a.3   (--parent T2a)
+             T2b (--parent T2)
+```
+
+T3 (`dependsOn=[T2]`) cannot run until T2 is `done`; T2 cannot finish
+until T2a, T2b — and T2a's three leaves — are all settled. So the new
+work lands strictly **between T2 and T3** without touching T3's deps.
+
+Mechanics worth knowing when you drive this by hand (workers normally
+don't hit these because they only ever act on what `pm next`/`pm pull`
+hand them):
+- **Claim ≠ runnable.** `pm executing` claims any `new` task without
+  checking deps or the parent gate — those gates live in `pm next` /
+  `pm pull`. Take what `pm next` gives you; don't claim out of order or
+  you bypass the ordering this pattern relies on.
+- **A spawned parent holds open.** Once you claim a subtree parent
+  (e.g. T2a), its own children become runnable, but finishing the parent
+  is refused (exit 14) until those children settle — finish the parent
+  *last*, after its leaves roll up.
+- **Don't re-claim the spawner.** The task doing the spawning (T2) is
+  already `working`; close it with `pm report` + `pm finished` only —
+  a second `pm executing` returns exit 6 (`status is 'working'`).
+
+Golden flow `G93` (`tests/integration/test_golden.py`) exercises this
+end to end.
+
 ### Cross-queue parent/child: cascade-pause discipline
 
 The default and recommended pattern is **same-queue** parent+children:

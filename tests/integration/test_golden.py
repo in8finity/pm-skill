@@ -2618,6 +2618,100 @@ def g88_cross_queue_reclaim_cascade_reaches_child() -> None:
             f"G88 task {t[:8]} latest status must carry reclaimed=true"
 
 
+def g93_dynamic_subtasks_land_between_siblings() -> None:
+    """G93: a task that plans MORE work mid-execution can force that work
+    to run *between* itself and a downstream sibling — without retro-editing
+    the sibling's deps — by planning the new work as its own SUBTASKS.
+
+    Topology: T1 -> T2 -> T3 (dependsOn chain). While T2 is `working`, it
+    plans T2a (with three leaves T2a.1/.2/.3) and T2b, all `--parent T2`.
+    Two invariants then enforce the ordering for free:
+      - rollup-at-finish (finished.py exit 14): T2 cannot close until every
+        descendant is settled;
+      - dependsOn: T3 waits for T2 to be `done`, which now transitively
+        requires the whole T2 subtree.
+
+    Asserts: (A) finishing T2 with open children is refused (exit 14);
+    (B) `pm next` never surfaces T3 while the subtree is open; (C) T3
+    becomes runnable only once T2 reaches `done`.
+    """
+    q = fresh_queue("g93")
+    env = {"PM_WORKDIR": ""}
+
+    def plan(title, *extra):
+        return json.loads(pm("plan", "--queue", q, "--title", title,
+                             "--text", title, *extra,
+                             env_extra=env).stdout)["task"]["text_sha256"]
+
+    def drive_done(task):
+        pm("executing", "--task", task)
+        pm("report", "--task", task, "--title", "r", "--text", "done")
+        pm("finished", "--task", task)
+
+    def claim_and_try_finish(task):
+        """Claim + report, then attempt to close. Returns the finished
+        exit code: 0 = closed, 14 = held open by unsettled children
+        (the task stays `working` so its children become runnable)."""
+        pm("executing", "--task", task)
+        pm("report", "--task", task, "--title", "r", "--text", "done")
+        return pm("finished", "--task", task, check=False).returncode
+
+    def nxt():
+        out = pm("next", "--queue", q, env_extra=env).stdout.strip()
+        return None if out == "null" else json.loads(out)["text_sha256"]
+
+    t1 = plan("T1")
+    t2 = plan("T2", "--depends-on", t1)
+    t3 = plan("T3", "--depends-on", t2)
+
+    assert_eq(nxt(), t1, "G93 first next() must be T1")
+    drive_done(t1)
+    assert_eq(nxt(), t2, "G93 next() after T1 done must be T2")
+
+    # Claim T2 and plan its subtree mid-flight.
+    pm("executing", "--task", t2)
+    t2a = plan("T2a", "--parent", t2)
+    t2b = plan("T2b", "--parent", t2)
+    leaves = [plan(f"T2a.{i}", "--parent", t2a) for i in (1, 2, 3)]
+    pm("report", "--task", t2, "--title", "r", "--text", "spawned subtree")
+
+    # (A) Closing T2 now must be refused — children unsettled.
+    refused = pm("finished", "--task", t2, check=False)
+    assert_eq(refused.returncode, 14,
+              f"G93 finishing T2 with open children must exit 14; "
+              f"got {refused.returncode}")
+
+    # (B) pm next must hand back a member of the T2 subtree, never T3.
+    # A subtree parent (T2a) claims open then holds at exit 14 until its
+    # own leaves settle; defer those for a second pass — exactly how a
+    # real worker finishes a parent only after its children roll up.
+    subtree = {t2a, t2b, *leaves}
+    held_open = []
+    while True:
+        n = nxt()
+        assert n != t3, "G93 T3 must stay blocked while T2 subtree is open"
+        if n is None:
+            break  # everything runnable is settled (T2a may still be held)
+        assert n in subtree, f"G93 next() returned an unexpected task {n[:12]}"
+        if claim_and_try_finish(n) == 14:
+            held_open.append(n)  # claimed; its children are now runnable
+
+    # Roll up the deferred parents (deepest first) now their leaves settle.
+    for parent in reversed(held_open):
+        pm("finished", "--task", parent)
+
+    # T2's whole subtree is settled but T2 itself is still `working`
+    # (claimed back before the loop); T3 (dependsOn T2) must remain
+    # blocked until T2 is `done`. T2 is already claimed, so just close it.
+    assert_eq(nxt(), None, "G93 T3 must remain blocked until T2 is done")
+    pm("finished", "--task", t2)
+
+    # (C) Only now does T3 unblock.
+    assert_eq(nxt(), t3, "G93 T3 must become runnable once T2 is done")
+    drive_done(t3)
+    assert_eq(nxt(), None, "G93 queue must be empty after T3 done")
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -2707,6 +2801,7 @@ ALL_FLOWS = {
     "G90": g90_cross_queue_child_runnable_once_parent_claimed,
     "G91": g91_report_files_extracts_affected_block,
     "G92": g92_script_path_verifier_uses_report_files,
+    "G93": g93_dynamic_subtasks_land_between_siblings,
 }
 
 
