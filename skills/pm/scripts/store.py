@@ -195,6 +195,37 @@ def latest_status(task_sha: str) -> dict[str, Any] | None:
     ))
 
 
+def bulk_status_values(task_shas: list[str]) -> dict[str, str | None]:
+    """Return ``{task_sha: current_status_str}`` for many tasks in a
+    SINGLE backend round trip via ``find_tips_bulk`` with an
+    ``attributes`` projection.
+
+    This is the hot-path replacement for calling ``latest_status`` (two
+    round trips each: ``find_tip`` + ``get_item_by_hash`` rehydrate) once
+    per task. ``pm status`` and ``pm next`` walk every task in a queue to
+    learn its current status; on a seasoned store that was O(N) tips ×
+    2 calls. With this it is one call regardless of N.
+
+    A task whose status chain is empty (orphan — Task with no TaskStatus)
+    is reported as ``None``, matching ``status_value(latest_status(...))``.
+    """
+    if not task_shas:
+        return {}
+    wps = [task_wp(s) for s in task_shas]
+    res = mcp_client.tool(
+        "find_tips_bulk",
+        {"work_package_ids": wps, "type": "TaskStatus",
+         "fields": ["attributes", "work_package_id"]},
+    )
+    tips = (res or {}).get("tips") if isinstance(res, dict) else None
+    tips = tips or {}
+    out: dict[str, str | None] = {}
+    for sha in task_shas:
+        tip = tips.get(task_wp(sha))
+        out[sha] = ((tip or {}).get("attributes") or {}).get("status") if tip else None
+    return out
+
+
 def latest_report(task_sha: str) -> dict[str, Any] | None:
     return _normalize_tip(mcp_client.tool(
         "find_tip",

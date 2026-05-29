@@ -2712,6 +2712,53 @@ def g93_dynamic_subtasks_land_between_siblings() -> None:
     assert_eq(nxt(), None, "G93 queue must be empty after T3 done")
 
 
+def g94_bulk_status_values_matches_per_task() -> None:
+    """G94: `store.bulk_status_values` (one find_tips_bulk round trip,
+    the pm status / pm next / pm pull hot-path optimization) returns
+    exactly what calling `status_value(latest_status(sha))` per task
+    would — across mixed states including an orphan (Task with no
+    TaskStatus, reported as None).
+
+    Locks in the perf rewrite: a regression that broke the bulk path
+    (wrong work_package_id keying, missing attributes projection, orphan
+    handling) would silently miscount `pm status` and mis-gate `pm next`.
+    """
+    q = fresh_queue("g94")
+    env = {"PM_WORKDIR": ""}
+
+    def plan(title, *extra):
+        return json.loads(pm("plan", "--queue", q, "--title", title,
+                             "--text", title, *extra,
+                             env_extra=env).stdout)["task"]["text_sha256"]
+
+    done_t = plan("done-task")
+    pm("executing", "--task", done_t)
+    pm("report", "--task", done_t, "--title", "r", "--text", "d")
+    pm("finished", "--task", done_t)
+
+    working_t = plan("working-task")
+    pm("executing", "--task", working_t)
+
+    new_t = plan("new-task")
+
+    # Orphan: a Task with NO TaskStatus chain. create_item directly so no
+    # initial status is appended (pm plan always appends `new`).
+    orphan_t = store.create_task(q, "orphan", "orphan body", "orphan-slug",
+                                 workdir="")["text_sha256"]
+    assert store.latest_status(orphan_t) is None, "G94 orphan must have no status"
+
+    shas = [done_t, working_t, new_t, orphan_t]
+    bulk = store.bulk_status_values(shas)
+    per_task = {s: store.status_value(store.latest_status(s)) for s in shas}
+
+    assert_eq(bulk, per_task, "G94 bulk must equal per-task lookups")
+    assert_eq(bulk[done_t], "done", "G94 done")
+    assert_eq(bulk[working_t], "working", "G94 working")
+    assert_eq(bulk[new_t], "new", "G94 new")
+    assert_eq(bulk[orphan_t], None, "G94 orphan -> None")
+    assert_eq(store.bulk_status_values([]), {}, "G94 empty input -> empty map")
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -2802,6 +2849,7 @@ ALL_FLOWS = {
     "G91": g91_report_files_extracts_affected_block,
     "G92": g92_script_path_verifier_uses_report_files,
     "G93": g93_dynamic_subtasks_land_between_siblings,
+    "G94": g94_bulk_status_values_matches_per_task,
 }
 
 

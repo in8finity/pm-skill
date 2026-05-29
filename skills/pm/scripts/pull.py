@@ -131,7 +131,14 @@ def main() -> int:
         # here is identical to what `pm next` would return.
         record_to_text = {t["record_sha256"]: t["text_sha256"] for t in tasks}
 
-        status_cache: dict[str, str | None] = {}
+        # One bulk tip lookup per attempt instead of one (two-round-trip)
+        # latest_status per task. This is the hottest path under fan-out:
+        # N workers each polling pull on a seasoned store was what pegged
+        # the single MCP server. Re-primed each retry attempt because a
+        # racing worker may have moved a tip since the last read.
+        status_cache: dict[str, str | None] = store.bulk_status_values(
+            [t["text_sha256"] for t in tasks]
+        )
         ctx_cache: dict[str, set[str]] = {}
 
         def status_of(sha: str) -> str | None:

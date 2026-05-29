@@ -39,15 +39,17 @@ def main() -> int:
     other: dict[str, int] = {}
 
     tasks = store.list_tasks(args.queue)
+    # One bulk tip lookup instead of one (two-round-trip) latest_status
+    # per task — the hot path that made `pm status` O(N) on a big store.
+    status_map = store.bulk_status_values([t["text_sha256"] for t in tasks])
     for t in tasks:
         sha = t["text_sha256"]
         slug = (t.get("attributes") or {}).get("slug") or t.get("title", "")
-        s = store.latest_status(sha)
-        if s is None:
+        v = status_map.get(sha)
+        if v is None:
             counts["orphan"] += 1
             orphan_list.append({"slug": slug, "sha": sha})
             continue
-        v = store.status_value(s) or "unknown"
         if v in counts:
             counts[v] += 1
         else:

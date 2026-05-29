@@ -56,7 +56,14 @@ def main() -> int:
     # status lookups off text_sha256, so build a one-shot translation.
     record_to_text = {t["record_sha256"]: t["text_sha256"] for t in tasks}
 
-    status_cache: dict[str, str | None] = {}
+    # Prime every in-queue task's current status in ONE bulk round trip
+    # instead of one (two-round-trip) latest_status per task — the hot
+    # path that made pm next O(N) on a seasoned store. status_of falls
+    # back to a single lookup for any sha not in the queue listing
+    # (e.g. a cross-queue dep/parent, which is rare).
+    status_cache: dict[str, str | None] = store.bulk_status_values(
+        [t["text_sha256"] for t in tasks]
+    )
     ctx_cache: dict[str, set[str]] = {}
 
     def status_of(sha: str) -> str | None:
