@@ -10,13 +10,19 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import sys
+import time
 import urllib.error
 import urllib.request
 from typing import Any
 
 DEFAULT_URL = "http://127.0.0.1:38417/mcp"
 _NEXT_ID = 0
+
+# hashharness >= v0.5.0 returns HTTP 503 + Retry-After when its inflight
+# semaphore is exhausted; transient 502/504 are treated the same way.
+_RETRYABLE_HTTP_STATUSES = (502, 503, 504)
 
 
 def _next_id() -> int:
@@ -25,30 +31,75 @@ def _next_id() -> int:
     return _NEXT_ID
 
 
-def call(method: str, params: dict[str, Any] | None = None) -> Any:
-    url = os.environ.get("HASHHARNESS_MCP_URL", DEFAULT_URL)
-    payload = {
-        "jsonrpc": "2.0",
-        "id": _next_id(),
-        "method": method,
-        "params": params or {},
-    }
-    body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+def _retry_delay(retry_after: str | None) -> float:
+    """Parse a Retry-After header value (integer seconds) and bound it.
+
+    Falls back to 1s when missing or unparseable. ±25% jitter is added by
+    the caller so concurrent workers don't re-collide on the next slot.
+    """
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.URLError as exc:
-        sys.stderr.write(
-            f"hashharness MCP unreachable at {url}: {exc}\n"
-            "Start it with: HASHHARNESS_MCP_TRANSPORT=http python -m hashharness.mcp_server\n"
+        delay = float(retry_after) if retry_after is not None else 1.0
+    except ValueError:
+        delay = 1.0
+    return min(max(delay, 0.1), 30.0)
+
+
+def _post_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """POST a JSON-RPC payload, honouring HTTP 503 + Retry-After backpressure.
+
+    Retries up to ``PM_MCP_RETRY_MAX`` (default 5) on 502/503/504, sleeping
+    Retry-After seconds with ±25% jitter so N workers don't synchronise
+    their retries. URLError (truly unreachable) and non-retriable HTTP
+    errors exit the process immediately, preserving the prior contract.
+    """
+    url = os.environ.get("HASHHARNESS_MCP_URL", DEFAULT_URL)
+    body = json.dumps(payload).encode("utf-8")
+    max_attempts = max(1, int(os.environ.get("PM_MCP_RETRY_MAX", "5")))
+
+    for attempt in range(max_attempts):
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
         )
-        sys.exit(2)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            # HTTPError must be handled before URLError (subclass relation).
+            if exc.code in _RETRYABLE_HTTP_STATUSES and attempt + 1 < max_attempts:
+                delay = _retry_delay(exc.headers.get("Retry-After"))
+                time.sleep(delay * (0.75 + 0.5 * random.random()))
+                continue
+            sys.stderr.write(
+                f"hashharness MCP HTTP {exc.code} {exc.reason} "
+                f"after {attempt + 1} attempt(s)\n"
+            )
+            sys.exit(3)
+        except urllib.error.URLError as exc:
+            sys.stderr.write(
+                f"hashharness MCP unreachable at {url}: {exc}\n"
+                "Start it with: HASHHARNESS_MCP_TRANSPORT=http python -m hashharness.mcp_server\n"
+            )
+            sys.exit(2)
+
+    # Defensive — the loop above should have returned or exited.
+    sys.stderr.write(
+        f"hashharness MCP retries exhausted after {max_attempts} attempts\n"
+    )
+    sys.exit(3)
+
+
+def call(method: str, params: dict[str, Any] | None = None) -> Any:
+    data = _post_payload(
+        {
+            "jsonrpc": "2.0",
+            "id": _next_id(),
+            "method": method,
+            "params": params or {},
+        }
+    )
     if "error" in data:
         sys.stderr.write(f"MCP error: {json.dumps(data['error'])}\n")
         sys.exit(3)
@@ -66,29 +117,14 @@ def tool(name: str, arguments: dict[str, Any]) -> Any:
 
 def call_safe(method: str, params: dict[str, Any] | None = None) -> tuple[Any, dict[str, Any] | None]:
     """Like ``call`` but returns ``(result, error)`` instead of exiting on MCP error."""
-    url = os.environ.get("HASHHARNESS_MCP_URL", DEFAULT_URL)
-    payload = {
-        "jsonrpc": "2.0",
-        "id": _next_id(),
-        "method": method,
-        "params": params or {},
-    }
-    body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    data = _post_payload(
+        {
+            "jsonrpc": "2.0",
+            "id": _next_id(),
+            "method": method,
+            "params": params or {},
+        }
     )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.URLError as exc:
-        sys.stderr.write(
-            f"hashharness MCP unreachable at {url}: {exc}\n"
-            "Start it with: HASHHARNESS_MCP_TRANSPORT=http python -m hashharness.mcp_server\n"
-        )
-        sys.exit(2)
     if "error" in data:
         return None, data["error"]
     return data.get("result"), None
