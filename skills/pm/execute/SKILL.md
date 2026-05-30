@@ -247,6 +247,37 @@ operator-visible failure mode if you ignore this rule is "N workers,
 N-1 silently empty-pulled" — see
 `feedback/sticky-context-batch-drain-collision-2026-05-30.md`.
 
+### Sizing `--agents` against the writer ceiling
+
+For non-sticky batches the hashharness backend (v0.5.0+) absorbs
+contention via **HTTP 503 + Retry-After** backpressure rather than
+connection resets, and `mcp_client.py` retries those with jittered
+backoff (env knob `PM_MCP_RETRY_MAX`, default 5). So over-spawning is
+self-correcting at the protocol layer rather than fatal. **But sqlite
+is still single-writer at the file-lock level**, so adding workers past
+the sustainable writer throughput just trades crash-time for retry-time
+wallclock — same total work, more stalls.
+
+Practical rule of thumb:
+
+- Start at `--agents 4` for general non-sticky drain. Sticky single-
+  cluster batches stay 1-worker by design (the binding serializes).
+- Use the **503-retry rate as the gauge.** Each worker logs (or its
+  caller can log) the number of 503 retries it issued. If
+  `503_retries / total_pm_calls` stays under ~10%, raise the count;
+  if it climbs above, you've hit the writer ceiling — more workers
+  add no real throughput.
+- Multi-cluster sticky batches: workers ≤ clusters (see "Sticky-
+  cluster drain contract" above). Sticky and writer-ceiling caps
+  compose by `min(cluster_count, writer_ceiling_workers)`.
+
+What you do NOT need to do: pre-emptively cap workers at 2 "because
+the backend collapses" — that was the failure mode pre-v0.5.0. With
+backpressure + transactional `create_item` (closes orphan-on-CAS-loss),
+the limiting signal is retry rate, not crash count. See
+`feedback/hashharness-v0.5.0-integration-2026-05-30.md` for the
+backstory.
+
 ### When to stop
 
 Workers stop when `pm next` returns `null`. The orchestrator (you) waits
