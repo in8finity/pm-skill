@@ -72,6 +72,30 @@ def shell_quote(v: str) -> str:
     return "'" + v.replace("'", "'\\''") + "'"
 
 
+def _format_explain_human(e: dict) -> str:
+    """Human-readable stderr summary for ``--explain`` without ``--json``.
+    Distinguishes 'queue genuinely drained' (every counter is 0) from
+    'work remains, gated to other contexts' (sticky_mismatch > 0)."""
+    lines = [
+        f"pm pull: no runnable task in queue '{e['queue']}'",
+        f"  candidates (status=new):       {e['candidates_new']}",
+        f"  blocked by dep:                {e['blocked_by_dep']}",
+        f"  blocked by parent unclaimed:   {e['blocked_by_parent_unclaimed']}",
+        f"  sticky, no worker context:     {e['sticky_no_context']}",
+        f"  sticky, owned by other ctx:    {e['sticky_mismatch']}",
+    ]
+    owners = e.get("sticky_owner_contexts") or []
+    if owners:
+        head = ", ".join(o[:12] for o in owners[:4])
+        more = f" (+{len(owners) - 4} more)" if len(owners) > 4 else ""
+        lines.append(f"  owner contexts:                {head}{more}")
+    if e["sticky_mismatch"] > 0 or e["blocked_by_dep"] > 0 or e["blocked_by_parent_unclaimed"] > 0:
+        lines.append("  -> work remains; gated to other workers/contexts, not drained")
+    else:
+        lines.append("  -> queue genuinely drained for this worker")
+    return "\n".join(lines) + "\n"
+
+
 def default_agent_id(context_id: str | None = None) -> str:
     """Mirrors executing.py / heartbeat.py so a worker that pulls,
     then heartbeats, then reports against the same task uses the same
@@ -109,6 +133,15 @@ def main() -> int:
                    help="emit JSON instead of shell-eval-able assignments. "
                         "Friendlier to restricted sandboxes that block "
                         "`eval` or `$(...)` command substitution.")
+    p.add_argument("--explain", action="store_true",
+                   help="when no task can be claimed, emit a diagnostic "
+                        "breakdown distinguishing 'queue genuinely drained' "
+                        "from 'work remains but is gated to other contexts': "
+                        "candidate count, sticky-ineligible count, "
+                        "dep/parent-blocked count, and the set of context_ids "
+                        "currently owning sticky-bound tasks. Under --json "
+                        "the breakdown is attached to the JSON payload as "
+                        "`explain`; otherwise it's printed to stderr.")
     args = p.parse_args()
 
     pat = re.compile(args.regex)
@@ -211,6 +244,16 @@ def main() -> int:
                 return True  # dangling parent link
             return cached != "new"
 
+        # Diagnostic counters for `--explain`. Reset per attempt — the
+        # LAST attempt's numbers are what gets surfaced when we return
+        # null. A worker that wants to log "queue is drained vs. gated
+        # to other contexts" reads these from --explain.
+        gated_by_dep = 0
+        gated_by_parent = 0
+        sticky_no_context = 0
+        sticky_mismatch = 0
+        sticky_owner_contexts: set[str] = set()
+
         candidate = None
         for t in tasks:
             sha = t["text_sha256"]
@@ -220,9 +263,11 @@ def main() -> int:
                 continue
             deps = (t.get("links") or {}).get("dependsOn") or []
             if not all(dep_done(d) for d in deps):
+                gated_by_dep += 1
                 continue
             # See next.py for the rationale on the parent-claim gate.
             if not parent_claimed(t):
+                gated_by_parent += 1
                 continue
             # Sticky-context gate (mirrors executing.py:135-149). Skip,
             # don't refuse — pull is a worker contract, so the right
@@ -230,19 +275,49 @@ def main() -> int:
             # sibling rather than crash the whole pull call.
             if store.task_is_sticky(t):
                 if not agent_context:
+                    sticky_no_context += 1
                     skip.add(sha)
                     continue
                 try:
                     store.check_sticky_eligibility(sha, agent_context)
                 except (store.StickyContextMismatch, store.StickyContextConflict):
+                    sticky_mismatch += 1
+                    # Record which OTHER context already owns this
+                    # cluster so the operator can see why their worker
+                    # was routed away.
+                    owner = store.task_context_id(sha)
+                    if owner:
+                        sticky_owner_contexts.add(owner)
+                    else:
+                        # No own context_id — must be bound via an
+                        # ancestor (parent/dep chain). Walk required_ctx.
+                        for ctx in required_ctx(sha):
+                            sticky_owner_contexts.add(ctx)
                     skip.add(sha)
                     continue
             candidate = t
             break
 
         if candidate is None:
+            # No runnable task this attempt. Build the explain payload —
+            # cheap, always available; only emitted when --explain.
+            explain = {
+                "queue": args.queue,
+                "candidates_new": len(new_shas),
+                "agent_context": agent_context,
+                "blocked_by_dep": gated_by_dep,
+                "blocked_by_parent_unclaimed": gated_by_parent,
+                "sticky_no_context": sticky_no_context,
+                "sticky_mismatch": sticky_mismatch,
+                "sticky_owner_contexts": sorted(sticky_owner_contexts),
+            }
             if args.json:
-                print("null")
+                if args.explain:
+                    print(json.dumps({"task": None, "explain": explain}))
+                else:
+                    print("null")
+            if args.explain and not args.json:
+                sys.stderr.write(_format_explain_human(explain))
             return 0  # queue empty (or every runnable filtered out)
 
         sha = candidate["text_sha256"]

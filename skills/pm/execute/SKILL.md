@@ -204,6 +204,49 @@ parallel; do **not** spawn them sequentially.
   worker delegation primitive available in that environment), then wait
   on them after the batch is launched.
 
+### Sticky-cluster drain contract (size `--agents` to clusters, not children)
+
+A **sticky cluster** is a `pm plan --sticky` parent + its subtree
+(planned for "do one expensive read, drain many cheap children with the
+same context"). Sticky is **the** context-sharing primitive: the first
+context that claims the cluster parent binds the whole subtree to
+itself, and every other worker that tries the cluster is refused with
+**exit 10** (`StickyContextMismatch`) and is *supposed* to route to a
+different cluster.
+
+The drain contract that follows from that:
+
+1. **Workers ≈ clusters, not children.** A queue with one cluster of
+   1,000 children is a one-worker drain. A queue with 8 independent
+   clusters is an eight-worker drain. Spawning more workers than
+   clusters wastes sub-agent sessions: the extra workers correctly
+   exit-10-route to nothing and return `pull: empty`, having burned
+   tokens to discover that the design predicted.
+
+2. **NEVER pre-claim the cluster parent from the orchestrator.** The
+   tempting "I'll just `pm executing --task <parent>` so children
+   become runnable" binds the cluster to the **orchestrator's**
+   context — locking out every worker. The parent-claim gate is
+   satisfied by the **draining worker's** first `pm pull` (which
+   claims the parent on its way to grabbing a child); no external
+   bump is needed or wanted.
+
+3. **For real parallelism, the planner emits multiple clusters.** If
+   you want N workers on a sticky batch, plan N clusters and let
+   exit-10 routing fan them out automatically. A single-cluster batch
+   is a single-owner drain by construction.
+
+4. **Each worker mints its own `PM_CONTEXT_ID`.** Two workers sharing a
+   context defeats the cluster-isolation guarantee — exit-10 routing
+   would mis-fire.
+
+The formal contract is in `system-models/planning_sticky_rebinding.als`;
+the refusal path in `store.check_sticky_eligibility` raises
+`StickyContext{Mismatch,Conflict}` from every chain-writing verb. The
+operator-visible failure mode if you ignore this rule is "N workers,
+N-1 silently empty-pulled" — see
+`feedback/sticky-context-batch-drain-collision-2026-05-30.md`.
+
 ### When to stop
 
 Workers stop when `pm next` returns `null`. The orchestrator (you) waits

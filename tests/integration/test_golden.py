@@ -2861,6 +2861,56 @@ def g95_audit_attests_queue_subtree() -> None:
         f"G95 audit human summary must say OK; got: {human.stdout!r}"
 
 
+def g96_pull_explain_distinguishes_drained_from_gated() -> None:
+    """G96: `pm pull --explain` distinguishes 'queue genuinely drained
+    for this worker' (every counter zero) from 'work remains, gated to
+    other contexts' (sticky_mismatch > 0, owner contexts surfaced).
+    Implements ergonomics gap B from
+    feedback/sticky-context-batch-drain-collision-2026-05-30.md."""
+    env = {"PM_WORKDIR": ""}
+
+    # Case 1: empty queue → drained.
+    q1 = fresh_queue("g96a")
+    p = pm("pull", "--queue", q1, "--json", "--explain", env_extra=env)
+    payload = json.loads(p.stdout)
+    assert_eq(payload["task"], None, "G96a empty pull task must be null")
+    exp = payload["explain"]
+    assert_eq(exp["candidates_new"], 0, "G96a empty queue has 0 new tasks")
+    assert_eq(exp["sticky_mismatch"], 0, "G96a empty queue has 0 sticky_mismatch")
+    assert exp["sticky_owner_contexts"] == [], "G96a empty queue has no owners"
+
+    # Case 2: sticky cluster owned by ctxA; worker with ctxB pulls →
+    # sticky_mismatch=1, owner_contexts=[ctxA].
+    q2 = fresh_queue("g96b")
+    parent_sha = json.loads(pm("plan", "--queue", q2, "--title", "P",
+                               "--text", "sticky parent", "--sticky",
+                               env_extra=env).stdout)["task"]["text_sha256"]
+    # one child of the sticky parent so there's something to gate-on
+    pm("plan", "--queue", q2, "--title", "C", "--text", "child",
+       "--parent", parent_sha, env_extra=env)
+    ctx_a = pm("context-id", env_extra=env).stdout.strip()
+    ctx_b = pm("context-id", env_extra=env).stdout.strip()
+
+    # ctxA claims the cluster parent via pull (binds the cluster).
+    envA = {**env, "PM_CONTEXT_ID": ctx_a}
+    out = pm("pull", "--queue", q2, "--json", env_extra=envA).stdout.strip()
+    assert json.loads(out)["task"], "G96b ctxA must claim the cluster parent"
+
+    # ctxB pulls → null + explain showing sticky_mismatch=1, ctxA in owners.
+    envB = {**env, "PM_CONTEXT_ID": ctx_b}
+    p = pm("pull", "--queue", q2, "--json", "--explain", env_extra=envB)
+    payload = json.loads(p.stdout)
+    assert_eq(payload["task"], None, "G96b ctxB pull task must be null")
+    exp = payload["explain"]
+    assert_eq(exp["agent_context"], ctx_b, "G96b agent_context must be ctxB")
+    assert exp["candidates_new"] >= 1, \
+        f"G96b candidates_new must be >= 1; got {exp['candidates_new']}"
+    assert exp["sticky_mismatch"] >= 1, \
+        f"G96b sticky_mismatch must be >= 1; got {exp['sticky_mismatch']}"
+    assert ctx_a in exp["sticky_owner_contexts"], \
+        f"G96b ctxA must appear in owner contexts; got {exp['sticky_owner_contexts']}"
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -2953,6 +3003,7 @@ ALL_FLOWS = {
     "G93": g93_dynamic_subtasks_land_between_siblings,
     "G94": g94_bulk_status_values_matches_per_task,
     "G95": g95_audit_attests_queue_subtree,
+    "G96": g96_pull_explain_distinguishes_drained_from_gated,
 }
 
 
